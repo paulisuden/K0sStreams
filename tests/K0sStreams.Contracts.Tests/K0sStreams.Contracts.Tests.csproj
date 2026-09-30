@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

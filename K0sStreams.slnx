@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/K0sStreams.Broker/K0sStreams.Broker.csproj" />
+    <Project Path="src/K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
+    <Project Path="src/K0sStreams.Coordination/K0sStreams.Coordination.csproj" />
+    <Project Path="src/K0sStreams.Queue/K0sStreams.Queue.csproj" />
+    <Project Path="src/K0sStreams.Replication/K0sStreams.Replication.csproj" />
+    <Project Path="src/K0sStreams.Storage/K0sStreams.Storage.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/K0sStreams.Broker.Tests/K0sStreams.Broker.Tests.csproj" />
+    <Project Path="tests/K0sStreams.Contracts.Tests/K0sStreams.Contracts.Tests.csproj" />
+    <Project Path="tests/K0sStreams.Coordination.Tests/K0sStreams.Coordination.Tests.csproj" />
+    <Project Path="tests/K0sStreams.Queue.Tests/K0sStreams.Queue.Tests.csproj" />
+    <Project Path="tests/K0sStreams.Replication.Tests/K0sStreams.Replication.Tests.csproj" />
+    <Project Path="tests/K0sStreams.Storage.Tests/K0sStreams.Storage.Tests.csproj" />
+  </Folder>
+</Solution>

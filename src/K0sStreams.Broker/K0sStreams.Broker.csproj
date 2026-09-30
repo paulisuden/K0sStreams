@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" />
+    <ProjectReference Include="../K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
+    <ProjectReference Include="../K0sStreams.Storage/K0sStreams.Storage.csproj" />
+    <ProjectReference Include="../K0sStreams.Queue/K0sStreams.Queue.csproj" />
+    <ProjectReference Include="../K0sStreams.Replication/K0sStreams.Replication.csproj" />
+    <ProjectReference Include="../K0sStreams.Coordination/K0sStreams.Coordination.csproj" />
+  </ItemGroup>
+
+</Project>

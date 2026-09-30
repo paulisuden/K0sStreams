@@ -4,7 +4,7 @@ Broker de mensajes distribuido escrito en .NET. Corre como 3 pods en un cluster 
 
 Proyecto de la materia **Middlewares Distribuidos** (2026).
 
-> **Estado:** en desarrollo. Hoy el repositorio tiene la documentación técnica; el código se agrega por fases (ver [Plan de desarrollo](#plan-de-desarrollo)).
+> **Estado:** en desarrollo. Está la base de la fase 0: solución, contratos, fakes en memoria, CI y Dockerfile. Cada bloque se desarrolla en su rama `feature/*` (ver [Plan de desarrollo](#plan-de-desarrollo)).
 
 ---
 

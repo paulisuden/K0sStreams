@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="KubernetesClient" />
+    <ProjectReference Include="../K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

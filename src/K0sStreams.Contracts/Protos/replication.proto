@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package k0sstreams.replication.v1;
+
+option csharp_namespace = "K0sStreams.Contracts.Grpc";
+
+// Servicio interno entre brokers, puerto 9091.
+// Cada elemento de `records` es un registro codificado con RecordCodec (mismo formato que en disco).
+service Replication {
+  // Líder → seguidor: agregar registros al final del log.
+  rpc Append (AppendRequest) returns (AppendResponse);
+  // Un seguidor atrasado pide lo que le falta.
+  rpc Fetch (FetchRequest) returns (stream RecordBatch);
+  // Época, end offset y high watermark de un broker.
+  rpc GetState (StateRequest) returns (StateResponse);
+}
+
+message AppendRequest {
+  int64 epoch = 1;
+  string topic = 2;
+  int32 partition = 3;
+  // Offset y época del registro anterior al primero del lote (-1 y 0 si el log está vacío).
+  // El seguidor rechaza con LOG_MISMATCH si no los tiene iguales: así detecta que su log divergió.
+  int64 prev_offset = 4;
+  int64 leader_hw = 5;
+  repeated bytes records = 6;
+  int64 prev_epoch = 7;
+  string leader_id = 8;
+}
+
+enum AppendError {
+  APPEND_ERROR_NONE = 0;
+  // request.epoch < época local: el emisor ya no es líder (fencing).
+  APPEND_ERROR_STALE_EPOCH = 1;
+  // prev_offset/prev_epoch no coinciden: el líder tiene que retroceder o el seguidor truncar.
+  APPEND_ERROR_LOG_MISMATCH = 2;
+  APPEND_ERROR_UNKNOWN_TOPIC = 3;
+  APPEND_ERROR_CORRUPT_RECORD = 4;
+}
+
+message AppendResponse {
+  bool ok = 1;
+  // Época del seguidor. Si es mayor que la del líder, el líder deja de serlo.
+  int64 epoch = 2;
+  int64 end_offset = 3;
+  string error = 4;
+  AppendError code = 5;
+}
+
+message FetchRequest {
+  int64 epoch = 1;
+  string topic = 2;
+  int32 partition = 3;
+  int64 from_offset = 4;
+  int32 max_records = 5;
+}
+
+message RecordBatch {
+  repeated bytes records = 1;
+  int64 leader_hw = 2;
+}
+
+message StateRequest {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+message StateResponse {
+  int64 epoch = 1;
+  int64 end_offset = 2;
+  int64 high_watermark = 3;
+  string node_id = 4;
+  bool is_leader = 5;
+}

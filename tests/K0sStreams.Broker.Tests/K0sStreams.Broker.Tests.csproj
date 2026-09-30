@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <ProjectReference Include="../../src/K0sStreams.Broker/K0sStreams.Broker.csproj" />
+  </ItemGroup>
+
+</Project>

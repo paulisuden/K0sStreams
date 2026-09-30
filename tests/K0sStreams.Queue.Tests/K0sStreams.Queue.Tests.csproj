@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/K0sStreams.Queue/K0sStreams.Queue.csproj" />
+  </ItemGroup>
+
+</Project>

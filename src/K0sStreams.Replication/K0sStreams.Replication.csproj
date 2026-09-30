@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Grpc.AspNetCore" />
+    <ProjectReference Include="../K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

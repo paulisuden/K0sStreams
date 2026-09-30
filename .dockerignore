@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+**/TestResults/
+.git/
+.github/
+.vs/
+.vscode/
+docs/
+tests/
+chaos/
+deploy/
+*.md
+*.pdf
+*.jpg

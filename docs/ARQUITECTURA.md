@@ -135,33 +135,55 @@ K0sStreams/
 
 ### Interfaces internas (C#)
 
+La versión vigente está en `src/K0sStreams.Contracts/` (con comentarios XML). Resumen:
+
 ```csharp
 public interface ILog {
-    ValueTask<long> AppendAsync(string topic, int partition, Record record, CancellationToken ct);
-    IAsyncEnumerable<Record> ReadAsync(string topic, int partition, long fromOffset, int max);
-    long HighWatermark(string topic, int partition);   // último offset confirmado por quórum
-    long EndOffset(string topic, int partition);       // último offset escrito localmente
-    ValueTask TruncateAsync(string topic, int partition, long toOffset);
+    ValueTask<long> AppendAsync(string topic, int partition, Record record, CancellationToken ct = default);
+    IAsyncEnumerable<Record> ReadAsync(string topic, int partition, long fromOffset, int max, CancellationToken ct = default);
+    long HighWatermark(string topic, int partition);   // último offset confirmado por quórum (-1 si vacío)
+    long EndOffset(string topic, int partition);       // último offset escrito localmente (-1 si vacío)
+    void AdvanceHighWatermark(string topic, int partition, long offset);   // lo llama la replicación
+    ValueTask TruncateAsync(string topic, int partition, long toOffset, CancellationToken ct = default);
 }
 
 public interface IQueueEngine {
-    ValueTask<Delivery?> ReceiveAsync(string topic, string queue, TimeSpan visibility);
-    ValueTask AckAsync(string topic, string queue, long offset);
-    ValueTask NackAsync(string topic, string queue, long offset, string reason);
-    void Apply(Record queueEvent);   // reconstruye estado desde el log
+    ValueTask<Delivery?> ReceiveAsync(string topic, string queue, TimeSpan visibility, CancellationToken ct = default);
+    ValueTask<bool> AckAsync(string topic, string queue, int partition, long offset, CancellationToken ct = default);
+    ValueTask<bool> NackAsync(string topic, string queue, int partition, long offset, string? reason, CancellationToken ct = default);
+    IReadOnlyList<DeadLetter> GetDeadLetters(string topic, string queue);
+    void Apply(string topic, Record queueEvent);   // reconstruye estado desde el log
 }
 
 public interface IReplicator {
-    ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct);
+    ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default);
 }
 
 public interface IClusterState {
+    string NodeId { get; }
     bool IsLeader { get; }
     long CurrentEpoch { get; }
     string? LeaderAddress { get; }
     event Action<long>? EpochChanged;
 }
+
+public interface ITopicCatalog {
+    ValueTask<bool> CreateAsync(TopicConfig config, CancellationToken ct = default);
+    TopicConfig? Find(string name);
+    IReadOnlyCollection<TopicConfig> List();
+}
 ```
+
+Cambios respecto de la primera versión de este documento (fase 0):
+
+- `ILog.AdvanceHighWatermark`: la replicación sube el high watermark al lograr quórum.
+- `AppendAsync` con `record.Offset = -1` asigna el offset (líder); con un offset explícito tiene que ser `EndOffset + 1` (réplica).
+- `ReadAsync` no corta en el high watermark: la API corta, la réplica no.
+- Ack y nack llevan la partición (con más de una partición el offset solo no alcanza) y devuelven `false` si el mensaje no estaba en proceso.
+- `IQueueEngine.GetDeadLetters` para `GET /dlq`; `ITopicCatalog` para los tópicos; `IClusterState.NodeId`.
+- Los eventos de cola se codifican con `QueueEvent`; la partición de un mensaje la elige `Partitioner` (CRC32 de la clave).
+
+Fakes en memoria disponibles en `K0sStreams.Contracts.Fakes`: `InMemoryLog`, `InMemoryTopicCatalog`, `InstantReplicator`, `StaticClusterState`.
 
 ### Formato de registro en disco
 
@@ -202,9 +224,12 @@ service Replication {
 message AppendRequest {
   int64 epoch = 1; string topic = 2; int32 partition = 3;
   int64 prev_offset = 4; int64 leader_hw = 5; repeated bytes records = 6;
+  int64 prev_epoch = 7; string leader_id = 8;
 }
-message AppendResponse { bool ok = 1; int64 epoch = 2; int64 end_offset = 3; string error = 4; }
+message AppendResponse { bool ok = 1; int64 epoch = 2; int64 end_offset = 3; string error = 4; AppendError code = 5; }
 ```
+
+Versión completa en `src/K0sStreams.Contracts/Protos/replication.proto`. Cada elemento de `records` es un registro codificado con `RecordCodec`, igual que en disco. `prev_epoch` permite que el seguidor detecte que su log divergió del líder (responde `LOG_MISMATCH`).
 
 Regla de fencing en Append: si request.epoch < época local, el seguidor responde ok = false y su época. El líder viejo, al ver una época mayor, deja de ser líder.
 
