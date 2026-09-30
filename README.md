@@ -65,8 +65,8 @@ Una vez levantado, la documentación interactiva queda en `http://<host>:9090/sw
 | `POST` | `/v1/topics/{t}/messages` | Publicar un mensaje |
 | `GET` | `/v1/topics/{t}/partitions/{p}/messages?from=&max=` | Leer como historial |
 | `POST` | `/v1/topics/{t}/queues/{q}/receive` | Tomar el próximo trabajo de la cola |
-| `POST` | `/v1/topics/{t}/queues/{q}/ack/{offset}` | Confirmar que se procesó |
-| `POST` | `/v1/topics/{t}/queues/{q}/nack/{offset}` | Devolverlo para reintentar |
+| `POST` | `/v1/topics/{t}/queues/{q}/ack/{partition}/{offset}` | Confirmar que se procesó |
+| `POST` | `/v1/topics/{t}/queues/{q}/nack/{partition}/{offset}` | Devolverlo para reintentar |
 | `GET` | `/v1/topics/{t}/queues/{q}/dlq` | Ver mensajes que agotaron los reintentos |
 | `GET` | `/health`, `/ready` | Sondas de Kubernetes |
 
@@ -88,7 +88,7 @@ curl 'http://localhost:9090/v1/topics/pedidos/partitions/0/messages?from=0&max=1
 
 # Consumir como cola
 curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/receive
-curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/ack/0
+curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/ack/0/0
 ```
 
 > Los cuerpos de ejemplo siguen el diseño acordado; pueden ajustarse cuando se implemente la API.

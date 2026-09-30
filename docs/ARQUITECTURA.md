@@ -208,8 +208,8 @@ Cada segmento es un par de archivos: 00000000000000000000.log y .index (offset �
 | POST | /v1/topics/{t}/messages | Publicar {key, value, deliverAt?} → {partition, offset} |
 | GET | /v1/topics/{t}/partitions/{p}/messages?from=&max= | Leer como historial |
 | POST | /v1/topics/{t}/queues/{q}/receive | Tomar el próximo trabajo |
-| POST | /v1/topics/{t}/queues/{q}/ack/{offset} | Confirmar |
-| POST | /v1/topics/{t}/queues/{q}/nack/{offset} | Devolver con motivo |
+| POST | /v1/topics/{t}/queues/{q}/ack/{partition}/{offset} | Confirmar |
+| POST | /v1/topics/{t}/queues/{q}/nack/{partition}/{offset} | Devolver con motivo |
 | GET | /v1/topics/{t}/queues/{q}/dlq | Ver mensajes muertos |
 | GET | /health, /ready, /swagger | Sondas de Kubernetes y documentación |
 
