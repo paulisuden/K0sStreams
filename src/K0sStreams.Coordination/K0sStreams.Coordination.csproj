@@ -2,6 +2,8 @@
 
   <ItemGroup>
     <PackageReference Include="KubernetesClient" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
     <ProjectReference Include="../K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
   </ItemGroup>
 
