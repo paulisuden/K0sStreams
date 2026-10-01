@@ -17,10 +17,6 @@ csharp_prefer_braces = true:warning
 csharp_using_directive_placement = outside_namespace:warning
 dotnet_sort_system_directives_first = true
 dotnet_style_qualification_for_field = false:warning
-# private_fields también captura const y static readonly, que por convención .NET van en
-# PascalCase sin prefijo. Se los saca antes con reglas propias: required_modifiers exige
-# TODOS los modificadores listados, y gana la primera regla que coincide con el símbolo.
-# required_modifiers no acepta OR, así que const y static readonly van en reglas separadas.
 dotnet_naming_rule.private_const.symbols = private_const
 dotnet_naming_rule.private_const.style = pascal_case
 dotnet_naming_rule.private_const.severity = warning
