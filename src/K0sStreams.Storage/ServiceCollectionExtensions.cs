@@ -11,7 +11,7 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddK0sStorage(this IServiceCollection services, IConfiguration configuration)
     {
         // Reemplazar por las implementaciones reales (la carpeta de datos está en Broker:DataDir).
-        services.AddSingleton<ILog, InMemoryLog>();
+        services.AddSingleton<ILog, InMemoryLog>(); // cuando alguien pida un ILog, dale un InMemoryLog, y que sea siempre el mismo objeto (Singleton)
         services.AddSingleton<ITopicCatalog, InMemoryTopicCatalog>();
         return services;
     }
