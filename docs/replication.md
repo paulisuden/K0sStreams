@@ -2,7 +2,7 @@
 
 What the replication layer of K0sStreams is for, what it owns, which contracts it talks through, and how we plan to build it in isolation before plugging it into the rest of the broker.
 
-Complements [ARQUITECTURA.md](ARQUITECTURA.md) (overall design) and [contexto.md](contexto.md) (state of the code).
+Complements [ARQUITECTURA.md](ARQUITECTURA.md) (overall design) and [contexto.md](contexto.md) (state of the code). What was built in each iteration, and how it was checked, is in [replication-iterations.md](replication-iterations.md). How the code is organized is in [replication-code-guide.md](replication-code-guide.md). Failure scenarios and the guardrail for each are drawn in [replication-scenarios.md](replication-scenarios.md).
 
 > **In one paragraph.** K0sStreams runs as three identical brokers. One of them, the **leader**, accepts writes. The other two, the **followers**, keep copies. Replication turns "the leader wrote it to its disk" into "it is on the disk of at least 2 of the 3 brokers", and only then lets the producer get its `201 OK`. That single rule is what lets us lose any one broker without losing a confirmed message. Replication also decides how far clients may read (the **high watermark**), brings lagging followers back up to date, and rejects writes from a leader that has already been replaced (**fencing**).
 
@@ -174,20 +174,25 @@ One extra rule, borrowed from Raft: the leader only advances the HW by counting 
 
 ```mermaid
 flowchart TD
-    A["Append arrives"] --> B{"request.epoch older than mine?"}
+    A["Append arrives"] --> V{"Valid topic name and partition?"}
+    V -- no --> R0["Reject: UNKNOWN_TOPIC"]
+    V -- yes --> B{"request.epoch older than mine?"}
     B -- yes --> R1["Reject: STALE_EPOCH, include my epoch"]
     B -- no --> C["Adopt request.epoch if it is newer"]
     C --> D{"Do I have prev_offset with prev_epoch?"}
     D -- no --> R2["Reject: LOG_MISMATCH, include my end offset"]
-    D -- yes --> E{"Do all records decode with a valid CRC?"}
+    D -- yes --> E{"Does the batch decode and fit after prev_offset?"}
     E -- no --> R3["Reject: CORRUPT_RECORD, append nothing"]
     E -- yes --> F["Skip records I already have (same offset and epoch).<br/>On the first conflict, truncate from there.<br/>Append the rest."]
     F --> G["HW = min(leader_hw, last offset of this request)"]
     G --> OK["ok, include my end offset"]
 ```
 
+- **Topic validation comes first** because the topic name becomes a folder on disk. Names follow `TopicConfig.IsValidName`, so something like `../etc` never reaches the log.
 - **"My epoch"** is the highest epoch this broker knows about: the larger of `IClusterState.CurrentEpoch` and the highest epoch it has accepted in an `Append`. A new leader may start sending before this broker's D has noticed the Lease change, so both sources count.
 - **Empty log:** `prev_offset = -1` always matches.
+- **"Fits after prev_offset"** means every record has a valid CRC and no extra bytes, the offsets are `prev_offset + 1, + 2…` with no gaps, and the epochs never go down and are not newer than the leader's.
+- **A conflict with a confirmed record** (below this broker's HW) is never truncated: `ILog` refuses, the handler logs it as critical and the call fails. If it happens, the protocol has a bug.
 - **Why `min(leader_hw, last offset of this request)` and not the end offset?** Beyond the records just checked, this follower may still hold stale records from an old leader. Only the prefix that was verified against the leader can be marked as confirmed.
 - **Same offset and same epoch means the same record.** That property is what makes retries and duplicate `Append`s harmless.
 
@@ -274,19 +279,24 @@ The leader sends an empty `Append` to each follower every `HeartbeatInterval` (a
 
 ## 8. Building it in isolation
 
-### 8.1 Proposed internal design
+### 8.1 Internal design
 
-| Component | Side | Role |
-| --- | --- | --- |
-| `ReplicationService` | both | gRPC adapter (`Replication.ReplicationBase`). Translates protobuf to domain calls; no logic of its own. |
-| `AppendHandler` | follower | The logic of section 5.3. Pure code over `ILog`, unit-testable without a network. |
-| `QuorumReplicator : IReplicator` | leader | Match offsets and pending waiters per partition, HW computation, `NotLeaderException`. |
-| `PeerReplicator` | leader | One loop per follower: reads from `ILog` at `nextOffset`, sends `Append`, handles ok, `LOG_MISMATCH` and `STALE_EPOCH`, sends heartbeats. |
-| `IPeerClient` | leader | Transport abstraction. `GrpcPeerClient` in production; an in-process client in tests that calls another node's `AppendHandler` directly. |
-| `EpochTracker` | both | "My epoch" = max(D's epoch, highest epoch accepted in an `Append`). Listens to `EpochChanged`. |
-| `LeaderPromotion` | new leader | The promotion step from section 10.1. Phase 4, once agreed with D. |
+| Component | Side | Role | Status |
+| --- | --- | --- | --- |
+| `ReplicationGrpcService` | both | gRPC endpoint on port 9091. Only adapts calls to `ReplicationNode`. | Phase 2 ✅ |
+| `ReplicationNode` | both | This broker's side of the protocol: `Append` (through `AppendHandler`), `Fetch`, `GetState`. | Phase 2 ✅ |
+| `AppendHandler` | follower | The logic of section 5.3, one append at a time per partition. Plain code over `ILog`, tested without a network. | Phase 2 ✅ |
+| `IReplicationPeer` | leader | "Another broker": the three operations. `ReplicationNode` implements it locally and `GrpcReplicationPeer` over the network. Both fail invalid requests with `RpcException(InvalidArgument)`, so tests can swap one for the other. | Phase 2 ✅ |
+| `GrpcReplicationPeer` | leader | gRPC client. Unary calls get a deadline of `RpcTimeout`; message limits fit a 16 MiB record. | Phase 2 ✅ |
+| `PeerDirectory` | leader | One long-lived gRPC channel per broker in `Replication:Peers`, except this one. | Phase 2 ✅ |
+| `EpochTracker` | both | "My epoch" = max(D's epoch, highest epoch accepted from a leader). | Phase 2 ✅ |
+| `QuorumReplicator : IReplicator` | leader | Match offsets and pending waiters per partition, HW computation, `NotLeaderException`. | Phase 3 |
+| `PeerReplicator` | leader | One loop per follower: reads from `ILog` at `nextOffset`, sends `Append`, handles ok, `LOG_MISMATCH` and `STALE_EPOCH`, sends heartbeats. | Phase 3 |
+| `LeaderPromotion` | new leader | The promotion step from section 10.1, once agreed with D. | Phase 4 |
 
-Proposed configuration (inside the replication block, no contract change):
+Until phase 3, `IReplicator` is still `InstantReplicator`: the leader alone confirms writes.
+
+Configuration lives in the replication block's own section, so there is no contract change. Everything is optional; the values shown are the defaults, except `Peers`:
 
 ```json
 "Replication": {
@@ -295,42 +305,79 @@ Proposed configuration (inside the replication block, no contract change):
     "broker-1": "http://broker-1.broker:9091",
     "broker-2": "http://broker-2.broker:9091"
   },
-  "HeartbeatInterval": "00:00:00.500",
   "RpcTimeout": "00:00:02",
-  "MaxBatchRecords": 500
+  "MaxBatchRecords": 500,
+  "MaxBatchBytes": 1048576
 }
 ```
 
+Out-of-range values stop the broker at startup. Like any setting, these can be overridden with environment variables (`Replication__RpcTimeout=00:00:05`). Phase 3 adds `HeartbeatInterval`.
+
 ### 8.2 The test harness
 
-Most of replication can be tested without sockets, without A's disk log and without D's Lease:
+Most of replication is tested without D's Lease or A's disk log. The helpers live in `tests/K0sStreams.Replication.Tests/Support/`:
 
-- **Three in-process nodes**, each with its own `InMemoryLog`, an `AppendHandler` and a `QuorumReplicator`.
-- **A controllable cluster state**: a test fake (in the test project, not in `Contracts`) that can change leader and epoch and raise `EpochChanged`. `StaticClusterState` can't do this.
-- **An in-process network** with fault injection: disconnect a node, delay it, drop the next N calls, "crash" it (keep its log, lose its memory state).
-- **`FakeTimeProvider`** for heartbeats and timeouts. This needs `Microsoft.Extensions.TimeProvider.Testing` added to `Directory.Packages.props`, which is a shared file, so tell the group first.
+- **`TestNode`**: one broker's replication stack over an `InMemoryLog`, called directly.
+- **`ControllableClusterState`**: a cluster state whose leader and epoch the test can change, and which raises `EpochChanged`. `StaticClusterState` can't do this. It lives in the test project, not in `Contracts`.
+- **`ReplicationTestServer`**: the replication block on its own, served by Kestrel over real HTTP/2 on a free loopback port, registered and mapped exactly like in the real host.
+- **`TestRecords`**: builders for records and requests.
 
-Then a thin layer of real gRPC tests (two hosts on loopback) for the adapter and the wire format.
+Phase 3 adds what the leader loops need:
 
-| Scenario | Checks |
-| --- | --- |
-| 3 healthy nodes | Append, quorum, leader HW; followers learn the HW on the next round. |
-| One follower down | Writes still confirm (2 of 3). This is the phase 3 done criterion. |
-| Both followers down | `WaitForQuorumAsync` waits until cancelled; the HW doesn't move. |
-| Follower restarts empty | Catches up from offset 0 and rejoins the quorum. |
-| Follower with a divergent tail | The tail is truncated and overwritten; confirmed records are never touched. |
-| Leader with an old epoch | Gets `STALE_EPOCH`; its pending waits fail with `NotLeaderException`. |
-| Demoted while waiting | `NotLeaderException`. |
-| Follower HW | Never exceeds the prefix verified against the leader. |
-| Queue events | Replicate exactly like messages (`Type` ≠ 0 changes nothing). |
-| Corrupt record bytes | `CORRUPT_RECORD`, nothing appended. |
-| Failover | A confirmed record survives a leader change (phase 4, after the promotion step). |
-| Real log | The same suite passes against A's log, not only `InMemoryLog`. |
+- **An in-process network with fault injection**: disconnect a node, delay it, drop the next N calls, "crash" it (keep its log, lose its memory state). It will be a decorator over `IReplicationPeer`.
+- **`FakeTimeProvider`** for heartbeats and timeouts. This needs `Microsoft.Extensions.TimeProvider.Testing` in `Directory.Packages.props`, which is a shared file, so tell the group first.
 
-### 8.3 Plugging it in
+| Scenario | Checks | Phase |
+| --- | --- | --- |
+| Follower checks | Every rejection in section 5.3: unknown topic, stale epoch, mismatch, corrupt or gapped batch, impossible epochs. Repeating an append is harmless. | 2 ✅ |
+| Follower with a divergent tail | The tail is truncated and overwritten, matching records are kept, confirmed records are never touched. | 2 ✅ |
+| Follower HW | Follows the leader's, never past the prefix verified against the leader, never backwards. | 2 ✅ |
+| Queue events | Replicate exactly like messages (`Type` ≠ 0 changes nothing). | 2 ✅ |
+| Fetch and GetState | Batches split by count and by size, `max_records`, HW reported, invalid requests rejected. | 2 ✅ |
+| Over real gRPC | A record fetched from one broker and appended to another arrives byte-identical. Fencing, a 6 MiB record, error statuses, unreachable broker. | 2 ✅ |
+| 3 healthy nodes | Append, quorum, leader HW; followers learn the HW on the next round. | 3 |
+| One follower down | Writes still confirm (2 of 3). This is the phase 3 done criterion. | 3 |
+| Both followers down | `WaitForQuorumAsync` waits until cancelled; the HW doesn't move. | 3 |
+| Follower restarts empty | Catches up from offset 0 and rejoins the quorum. | 3 |
+| Leader with an old epoch | Gets `STALE_EPOCH`; its pending waits fail with `NotLeaderException`. | 3 |
+| Demoted while waiting | `NotLeaderException`. | 3 |
+| Failover | A confirmed record survives a leader change, after the promotion step. | 4 |
+| Real log | The same suite passes against A's log, not only `InMemoryLog`. | When A's log lands |
 
-1. Replace `InstantReplicator` with `QuorumReplicator` in `AddK0sReplication`, add `services.AddGrpc()`, and map the service in `MapK0sReplication`, restricted to port 9091 (`RequireHost("*:9091")`).
-2. `HostTests` already checks that an `IReplicator` is registered.
+### 8.3 Trying it by hand
+
+`GrpcReplicationTests` automates this, but it's worth seeing once with two real processes. Start two brokers, the second one on other ports:
+
+```bash
+dotnet build
+dotnet run --project src/K0sStreams.Broker --no-build -- --Broker:NodeId=broker-0
+dotnet run --project src/K0sStreams.Broker --no-build -- --Broker:NodeId=broker-1 \
+  --Kestrel:Endpoints:Http:Url=http://0.0.0.0:9190 --Kestrel:Endpoints:Grpc:Url=http://0.0.0.0:9191
+```
+
+Then let grpcurl play the leader. The record below is offset 0, epoch 1, key `order-1`, value `hello`, encoded with `RecordCodec` and then base64:
+
+```bash
+P="-plaintext -emit-defaults -import-path src/K0sStreams.Contracts/Protos -proto replication.proto"
+SVC=k0sstreams.replication.v1.Replication
+REC=OQAAABa37oIAAAAAAAAAAAEAAAAAAAAAAADALMiZAQAAAAAAAAAAAAAHAAAAb3JkZXItMQUAAABoZWxsbw==
+
+# 1. Give broker-0 the record (B's API doesn't exist yet, so we write through replication).
+grpcurl $P -d "{\"epoch\":1,\"topic\":\"orders\",\"prevOffset\":-1,\"leaderHw\":0,\"records\":[\"$REC\"]}" localhost:9091 $SVC/Append
+# 2. Read it back from broker-0: the batch carries the same base64 bytes and leaderHw 0.
+grpcurl $P -d '{"epoch":1,"topic":"orders","fromOffset":0}' localhost:9091 $SVC/Fetch
+# 3. Send those bytes to broker-1, as the leader would.
+grpcurl $P -d "{\"epoch\":1,\"topic\":\"orders\",\"prevOffset\":-1,\"leaderHw\":0,\"leaderId\":\"broker-0\",\"records\":[\"$REC\"]}" localhost:9191 $SVC/Append
+# 4. broker-1 now reports endOffset 0 and highWatermark 0.
+grpcurl $P -d '{"topic":"orders"}' localhost:9191 $SVC/GetState
+```
+
+Sending step 3 again changes nothing, because the record is already there. Sending it with `"epoch":0` gets `APPEND_ERROR_STALE_EPOCH`.
+
+### 8.4 Plugging it in
+
+1. Already done: `AddK0sReplication` registers gRPC and `MapK0sReplication` maps the service. It is mapped on every Kestrel endpoint, but port 9090 only speaks HTTP/1.1 and gRPC needs HTTP/2, so in practice it is reachable only on 9091.
+2. Phase 3: replace `InstantReplicator` with `QuorumReplicator` in `AddK0sReplication`. `HostTests` already checks that an `IReplicator` is registered.
 3. When A's log lands, rerun the suite against it.
 4. When D's Lease lands, run the failover scenarios against it.
 
@@ -341,7 +388,7 @@ Then a thin layer of real gRPC tests (two hosts on loopback) for the adapter and
 | Phase | Dates | Replication delivers | Done when |
 | --- | --- | --- | --- |
 | 1. PoC | until 7 Oct | Nothing new: `InstantReplicator` is already registered. Help A with tests. | — |
-| 2. Queue + gRPC | 8–14 Oct | gRPC service (`Append` with every check, `Fetch`, `GetState`), `AppendHandler`, `IPeerClient`, test harness. | grpcurl replicates one record between two local processes. |
+| 2. Queue + gRPC | 8–14 Oct | ✅ gRPC service (`Append` with every check, `Fetch`, `GetState`), `AppendHandler`, `IReplicationPeer` and its gRPC client, test harness. | grpcurl replicates one record between two local processes (section 8.3). |
 | 3. Quorum | 15–21 Oct | `QuorumReplicator`, `PeerReplicator`, HW, catch-up, heartbeats. Fixed leader: broker-0. | Docker compose of 3: stop a follower and writes continue; restart it and it catches up. |
 | 4. Failover | 22–28 Oct | Fencing, stepping down, leader promotion with D. | Kill the leader: another takes over in < 15 s with no confirmed message lost. |
 | 5. Chaos | 29 Oct–4 Nov | Chaos scenarios for lagging and diverged followers. | "0 confirmed messages lost in N runs". |
