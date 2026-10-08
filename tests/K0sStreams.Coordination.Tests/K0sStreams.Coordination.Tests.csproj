@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <!-- ConfigurationBuilder y ServiceCollection, sin agregar paquetes a Directory.Packages.props. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/K0sStreams.Coordination/K0sStreams.Coordination.csproj" />
   </ItemGroup>
 
