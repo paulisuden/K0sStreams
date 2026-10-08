@@ -22,7 +22,6 @@ internal static class TestRecords
         {
             Epoch = epoch,
             Topic = Topic,
-            Partition = 0,
             PrevOffset = prevOffset,
             PrevEpoch = prevEpoch,
             LeaderHw = leaderHw,
@@ -36,14 +35,14 @@ internal static class TestRecords
     {
         foreach (var record in Sequence(epochs))
         {
-            await log.AppendAsync(Topic, 0, record);
+            await log.AppendAsync(Topic, record);
         }
     }
 
     public static async Task<List<long>> EpochsAsync(ILog log) =>
-        await log.ReadAsync(Topic, 0, 0, int.MaxValue).Select(record => record.Epoch).ToListAsync();
+        await log.ReadAsync(Topic, 0, int.MaxValue).Select(record => record.Epoch).ToListAsync();
 
     /// <summary>The log as base64-encoded records, to compare two logs byte for byte.</summary>
     public static async Task<List<string>> EncodedAsync(ILog log) =>
-        await log.ReadAsync(Topic, 0, 0, int.MaxValue).Select(record => Convert.ToBase64String(RecordCodec.Encode(record))).ToListAsync();
+        await log.ReadAsync(Topic, 0, int.MaxValue).Select(record => Convert.ToBase64String(RecordCodec.Encode(record))).ToListAsync();
 }

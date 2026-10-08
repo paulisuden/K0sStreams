@@ -285,7 +285,7 @@ The leader sends an empty `Append` to each follower every `HeartbeatInterval` (a
 | --- | --- | --- | --- |
 | `ReplicationGrpcService` | both | gRPC endpoint on port 9091. Only adapts calls to `ReplicationNode`. | Phase 2 ✅ |
 | `ReplicationNode` | both | This broker's side of the protocol: `Append` (through `AppendHandler`), `Fetch`, `GetState`. | Phase 2 ✅ |
-| `AppendHandler` | follower | The logic of section 5.3, one append at a time per partition. Plain code over `ILog`, tested without a network. | Phase 2 ✅ |
+| `AppendHandler` | follower | The logic of section 5.3, one append at a time per topic. Plain code over `ILog`, tested without a network. | Phase 2 ✅ |
 | `IReplicationPeer` | leader | "Another broker": the three operations. `ReplicationNode` implements it locally and `GrpcReplicationPeer` over the network. Both fail invalid requests with `RpcException(InvalidArgument)`, so tests can swap one for the other. | Phase 2 ✅ |
 | `GrpcReplicationPeer` | leader | gRPC client. Unary calls get a deadline of `RpcTimeout`; message limits fit a 16 MiB record. | Phase 2 ✅ |
 | `PeerDirectory` | leader | One long-lived gRPC channel per broker in `Replication:Peers`, except this one. | Phase 2 ✅ |

@@ -10,7 +10,7 @@ Decisions that change the scope, the contracts or the design of K0sStreams. Each
 | --- | --- |
 | Date | 7 Oct 2026 |
 | Proposed by | C, Replication |
-| Status | Decided by C. Changes to `Contracts` need the team's agreement (repo rule 3), in one grouped PR. |
+| Status | Decided by C. Replication side done (8 Oct 2026). Changes to `Contracts` need the team's agreement (repo rule 3), in one grouped PR. |
 
 ### Context
 
@@ -70,7 +70,7 @@ The last row is the key point. In "before", the three partitions all live on the
 | Fakes | `InMemoryLog` keyed by topic only; `InstantReplicator` follows `IReplicator`. |
 | **A**, Storage | One folder per topic, with no partition level. |
 | **B**, Queue and API | Read becomes `GET /v1/topics/{t}/messages?from=&max=`. Ack and nack become `/v1/topics/{t}/queues/{q}/ack/{offset}` and `.../nack/{offset}`; the `fix/ack-nack-partition-en-ruta` branch is no longer needed. Consuming no longer merges partitions. |
-| **C**, Replication | Validation and locks per topic (`PartitionAddress` becomes a topic check); requests and tests drop the partition. |
+| **C**, Replication | ✅ Done. Validation and locks are per topic. `SingleLog.cs` pins partition 0 and rejects any other until the contracts change; then that file is deleted. |
 | **D**, Platform | The `Topic` CRD has no `partitions` field. |
 | Docs | README, ARQUITECTURA.md, contexto.md and the replication docs drop partitions from routes, examples and diagrams. |
 

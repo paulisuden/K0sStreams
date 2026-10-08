@@ -39,8 +39,7 @@ internal sealed class ReplicationNode(
 
         epochs.Observe(request.Epoch);
         string topic = request.Topic;
-        int partition = request.Partition;
-        long endOffset = log.EndOffset(topic, partition);
+        long endOffset = log.EndOffset(topic);
         long last = request.MaxRecords > 0 ? Math.Min(endOffset, request.FromOffset + request.MaxRecords - 1) : endOffset;
 
         long next = request.FromOffset;
@@ -50,12 +49,12 @@ internal sealed class ReplicationNode(
         {
             long readFrom = next;
             int count = (int)Math.Min(_options.MaxBatchRecords, last - next + 1);
-            await foreach (var record in log.ReadAsync(topic, partition, next, count, ct).ConfigureAwait(false))
+            await foreach (var record in log.ReadAsync(topic, next, count, ct).ConfigureAwait(false))
             {
                 int size = RecordCodec.GetEncodedSize(record);
                 if (batch.Records.Count == _options.MaxBatchRecords || (batch.Records.Count > 0 && batchBytes + size > _options.MaxBatchBytes))
                 {
-                    yield return Seal(batch, topic, partition);
+                    yield return Seal(batch, topic);
                     batch = new RecordBatch();
                     batchBytes = 0;
                 }
@@ -75,7 +74,7 @@ internal sealed class ReplicationNode(
 
         if (batch.Records.Count > 0)
         {
-            yield return Seal(batch, topic, partition);
+            yield return Seal(batch, topic);
         }
     }
 
@@ -86,24 +85,24 @@ internal sealed class ReplicationNode(
         return Task.FromResult(new StateResponse
         {
             Epoch = epochs.Current,
-            EndOffset = log.EndOffset(request.Topic, request.Partition),
-            HighWatermark = log.HighWatermark(request.Topic, request.Partition),
+            EndOffset = log.EndOffset(request.Topic),
+            HighWatermark = log.HighWatermark(request.Topic),
             NodeId = cluster.NodeId,
             IsLeader = cluster.IsLeader,
         });
     }
 
-    private RecordBatch Seal(RecordBatch batch, string topic, int partition)
+    private RecordBatch Seal(RecordBatch batch, string topic)
     {
-        batch.LeaderHw = log.HighWatermark(topic, partition);
+        batch.LeaderHw = log.HighWatermark(topic);
         return batch;
     }
 
     private static void EnsureValid(string topic, int partition)
     {
-        if (!PartitionAddress.IsValid(topic, partition))
+        if (!SingleLog.IsValid(topic, partition))
         {
-            throw InvalidArgument($"Invalid topic '{topic}' or partition {partition}.");
+            throw InvalidArgument($"Invalid topic '{topic}', or partition {partition}: every topic is a single log, partition {SingleLog.Partition}.");
         }
     }
 

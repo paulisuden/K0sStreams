@@ -29,16 +29,16 @@ public sealed class GrpcReplicationTests : IAsyncLifetime
     public async Task Records_fetched_from_one_broker_are_replicated_to_another()
     {
         await SeedAsync(_leader.Log, 1, 1, 1);
-        _leader.Log.AdvanceHighWatermark(Topic, 0, 2);
+        _leader.Log.AdvanceHighWatermark(Topic, 2);
 
-        var batches = await _leader.Client.FetchAsync(new FetchRequest { Epoch = 1, Topic = Topic, Partition = 0, FromOffset = 0 }).ToListAsync();
+        var batches = await _leader.Client.FetchAsync(new FetchRequest { Epoch = 1, Topic = Topic, FromOffset = 0 }).ToListAsync();
         var append = Append(1, -1, 0, batches[^1].LeaderHw);
         append.Records.AddRange(batches.SelectMany(batch => batch.Records));
         var response = await _follower.Client.AppendAsync(append);
 
         response.Ok.Should().BeTrue();
         (await EncodedAsync(_follower.Log)).Should().Equal(await EncodedAsync(_leader.Log));
-        var state = await _follower.Client.GetStateAsync(new StateRequest { Topic = Topic, Partition = 0 });
+        var state = await _follower.Client.GetStateAsync(new StateRequest { Topic = Topic });
         state.Should().Be(new StateResponse { Epoch = 1, EndOffset = 2, HighWatermark = 2, NodeId = "broker-1", IsLeader = false });
     }
 
@@ -60,7 +60,7 @@ public sealed class GrpcReplicationTests : IAsyncLifetime
 
         (await _follower.Client.AppendAsync(Append(1, -1, 0, -1, big))).Ok.Should().BeTrue();
 
-        var batches = await _follower.Client.FetchAsync(new FetchRequest { Epoch = 1, Topic = Topic, Partition = 0, FromOffset = 0 }).ToListAsync();
+        var batches = await _follower.Client.FetchAsync(new FetchRequest { Epoch = 1, Topic = Topic, FromOffset = 0 }).ToListAsync();
         batches.Should().ContainSingle().Which.Records.Should().ContainSingle().Which.Length.Should().Be(RecordCodec.GetEncodedSize(big));
     }
 

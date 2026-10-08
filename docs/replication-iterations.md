@@ -35,7 +35,7 @@ Code in `src/K0sStreams.Replication/`:
 | `PeerDirectory.cs` | One long-lived gRPC channel per broker listed in `Replication:Peers`, except this one. |
 | `EpochTracker.cs` | This broker's epoch for fencing: the highest of D's epoch and the highest epoch accepted from a leader. |
 | `ReplicationOptions.cs` | The `Replication` configuration section (`Peers`, `RpcTimeout`, `MaxBatchRecords`, `MaxBatchBytes`), checked at startup. |
-| `PartitionAddress.cs` | Topic and partition validation shared by all three operations. |
+| `PartitionAddress.cs` | Topic and partition validation shared by all three operations. Replaced by `SingleLog.cs` in [DEC-001](decisions.md). |
 | `ServiceCollectionExtensions.cs` | `AddK0sReplication` registers all of the above plus gRPC; `MapK0sReplication` maps the service. |
 
 Tests in `tests/K0sStreams.Replication.Tests/`, 54 in total:

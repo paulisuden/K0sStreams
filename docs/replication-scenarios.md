@@ -23,7 +23,7 @@ Reflects the code as of [iteration 1](replication-iterations.md) (phase 2): the 
 | [N4](#n4-reading-a-brokers-state-and-records) | Reading a broker's state and records | — | State, and batches with the HW | `GetState_reports_epoch_offsets_and_role`, `Fetch_streams_the_log_in_batches_of_at_most_MaxBatchRecords` |
 | | **Part 2 · Failure scenarios** | | | |
 | [0](#0-the-map-every-check-an-append-goes-through) | Overview | The checks in order | — | — |
-| [1](#1-a-request-names-an-invalid-topic-or-partition) | Invalid topic or partition (e.g. `../etc`) | Validate the address before touching the log | `UNKNOWN_TOPIC` / `InvalidArgument` | `Invalid_topic_or_partition_is_rejected`, `Invalid_fetch_fails_with_invalid_argument`, `Invalid_GetState_fails_with_invalid_argument`, `Invalid_requests_fail_with_invalid_argument` |
+| [1](#1-a-request-names-an-invalid-topic-or-partition) | Invalid topic or partition (e.g. `../etc`) | Validate the address before touching the log | `UNKNOWN_TOPIC` / `InvalidArgument` | `Invalid_topic_or_a_partition_other_than_0_is_rejected`, `Invalid_fetch_fails_with_invalid_argument`, `Invalid_GetState_fails_with_invalid_argument`, `Invalid_requests_fail_with_invalid_argument` |
 | [2](#2-a-replaced-leader-keeps-writing) | A replaced leader keeps writing | Fencing by epoch | `STALE_EPOCH` | `Append_with_an_older_epoch_is_rejected_and_reports_the_local_epoch`, `A_stale_leader_is_fenced` |
 | [3](#3-the-new-leader-is-faster-than-coordination) | New leader is faster than coordination | Adopt the newer epoch at once | Older leaders fenced from then on | `A_newer_epoch_is_adopted_and_fences_older_leaders`, `A_newer_epoch_is_adopted_even_when_the_log_does_not_match`, `EpochTrackerTests` |
 | [4](#4-the-follower-is-behind) | Follower is behind (was down) | Refuse to leave a hole | `LOG_MISMATCH` + end offset | `Missing_previous_record_is_a_mismatch_that_reports_the_end_offset` |
@@ -36,7 +36,7 @@ Reflects the code as of [iteration 1](replication-iterations.md) (phase 2): the 
 | [11](#11-the-follower-holds-records-from-an-old-leader) | Follower holds records from an old leader | Truncate at the first conflict | Tail replaced | `Divergent_tail_is_replaced_by_the_leaders_records`, `Records_before_the_first_conflict_are_kept` |
 | [12](#12-the-leader-contradicts-confirmed-data) | Leader contradicts confirmed data | Never truncate below the HW | Refused, critical log | `Conflict_with_confirmed_records_is_refused` |
 | [13](#13-deciding-what-the-follower-counts-as-confirmed) | What a follower counts as confirmed | HW = min(leader's HW, verified prefix), never backwards | Unverified records never confirmed | `Heartbeat_moves_the_high_watermark_up_to_the_leaders`, `High_watermark_stops_at_the_prefix_verified_against_the_leader`, `High_watermark_never_moves_back` |
-| [14](#14-two-requests-for-the-same-partition-at-once) | Two requests for one partition at once | Lock per partition | Run one after the other | `Concurrent_appends_to_the_same_partition_do_not_interfere` |
+| [14](#14-two-requests-for-the-same-topic-at-once) | Two requests for one topic at once | Lock per topic | Run one after the other | `Concurrent_appends_to_the_same_topic_do_not_interfere` |
 | [15](#15-a-broker-asks-for-records-fetch) | A broker asks for records (`Fetch`) | Validated, bounded batches | Batches with the HW | `Fetch_*` tests in `ReplicationNodeTests` |
 | [16](#16-the-other-broker-is-down-or-slow) | The other broker is down or slow | Deadlines on calls | `Unavailable` / `DeadlineExceeded` | `An_unreachable_broker_fails_with_unavailable` (slow path not tested yet) |
 | [17](#17-the-configuration-is-wrong) | Wrong configuration | Checked at startup; never a peer of itself | Broker refuses to start | `Out_of_range_settings_are_rejected`, `Peers_come_from_configuration_and_exclude_this_broker` |
@@ -89,7 +89,7 @@ sequenceDiagram
     L->>S: Append(epoch 1, prev 41/e1, records [42/e1, 43/e1], leader_hw 41)
     S->>N: AppendAsync
     N->>H: HandleAsync
-    Note over H: G1 orders/0 is a valid address ✓<br/>Take the orders/0 lock
+    Note over H: G1 orders is a valid address ✓<br/>Take the orders lock
     H->>E: Current?
     E-->>H: 1
     Note over H: G2 epoch 1 is not older than 1 ✓<br/>Observe(1) changes nothing
@@ -219,10 +219,10 @@ All of it lives in [AppendHandler.cs](../src/K0sStreams.Replication/AppendHandle
 
 ```mermaid
 flowchart LR
-    V{"PartitionAddress.IsValid<br/>lowercase, digits, . - _<br/>1 to 100 chars, partition 0 to 63"}
+    V{"SingleLog.IsValid<br/>lowercase, digits, . - _<br/>1 to 100 chars, partition 0 only"}
     A["Append<br/>topic: ../etc"] --> V
     F["Fetch<br/>topic: Orders"] --> V
-    S["GetState<br/>partition: 64"] --> V
+    S["GetState<br/>partition: 1"] --> V
     V -- "no, Append" --> R1["AppendResponse<br/>UNKNOWN_TOPIC"]:::bad
     V -- "no, Fetch or GetState" --> R2["RpcException<br/>InvalidArgument"]:::bad
     V -- yes --> LOG[("ILog")]:::ok
@@ -237,11 +237,11 @@ flowchart LR
 | `../etc` | ❌ | Must start with a lowercase letter or digit; `/` is not allowed |
 | `Orders` | ❌ | Uppercase |
 | empty name | ❌ | At least one character |
-| `orders`, partition -1 or 64 | ❌ | Partitions go from 0 to 63 |
+| `orders`, partition 1 (or any but 0) | ❌ | Every topic is a single log (DEC-001); 0 is also the protobuf default, so senders can leave it out |
 
-**Guardrail.** Every operation validates the address with the same rules as topic creation (`TopicConfig.IsValidName`) before any other step. Because the check runs before taking the partition lock, junk names don't even create a lock entry in memory.
+**Guardrail.** Every operation validates the address with the same rules as topic creation (`TopicConfig.IsValidName`) before any other step. Because the check runs before taking the topic's lock, junk names don't even create a lock entry in memory.
 
-**Where.** [PartitionAddress.cs](../src/K0sStreams.Replication/PartitionAddress.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
+**Where.** [SingleLog.cs](../src/K0sStreams.Replication/SingleLog.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
 
 ---
 
@@ -557,23 +557,23 @@ flowchart TD
 
 ---
 
-## 14. Two requests for the same partition at once
+## 14. Two requests for the same topic at once
 
 **When it happens.** A retry overlaps with the original request, or a heartbeat arrives while a batch is still being written.
 
 ```mermaid
 sequenceDiagram
-    participant R1 as Call 1 · orders/0
-    participant R2 as Call 2 · orders/0 (a retry)
-    participant R3 as Call 3 · payments/0
-    participant G as Per-partition locks
+    participant R1 as Call 1 · orders
+    participant R2 as Call 2 · orders (a retry)
+    participant R3 as Call 3 · payments
+    participant G as Per-topic locks
     participant LOG as ILog
-    R1->>G: lock orders/0
+    R1->>G: lock orders
     G-->>R1: granted
-    R2->>G: lock orders/0
+    R2->>G: lock orders
     Note over R2,G: Waits
-    R3->>G: lock payments/0
-    G-->>R3: granted, different partition, runs in parallel
+    R3->>G: lock payments
+    G-->>R3: granted, different topic, runs in parallel
     R1->>LOG: check, reconcile, append
     R1->>G: release
     G-->>R2: granted
@@ -581,9 +581,9 @@ sequenceDiagram
     R2->>G: release
 ```
 
-**Guardrail.** Appends to the same partition run one at a time. The handler reads the log, decides, and then writes; if two calls interleaved, both could decide to write the same offset, or one could truncate what the other just wrote. Different partitions don't block each other.
+**Guardrail.** Appends to the same topic run one at a time. The handler reads the log, decides, and then writes; if two calls interleaved, both could decide to write the same offset, or one could truncate what the other just wrote. Different topics don't block each other.
 
-**Where.** The lock in `AppendHandler.HandleAsync` (one `SemaphoreSlim` per topic and partition).
+**Where.** The lock in `AppendHandler.HandleAsync` (one `SemaphoreSlim` per topic).
 
 ---
 
