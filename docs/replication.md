@@ -290,11 +290,12 @@ The leader sends an empty `Append` to each follower every `HeartbeatInterval` (a
 | `GrpcReplicationPeer` | leader | gRPC client. Unary calls get a deadline of `RpcTimeout`; message limits fit a 16 MiB record. | Phase 2 ✅ |
 | `PeerDirectory` | leader | One long-lived gRPC channel per broker in `Replication:Peers`, except this one. | Phase 2 ✅ |
 | `EpochTracker` | both | "My epoch" = max(D's epoch, highest epoch accepted from a leader). | Phase 2 ✅ |
-| `QuorumReplicator : IReplicator` | leader | Match offsets and pending waiters per partition, HW computation, `NotLeaderException`. | Phase 3 |
-| `PeerReplicator` | leader | One loop per follower: reads from `ILog` at `nextOffset`, sends `Append`, handles ok, `LOG_MISMATCH` and `STALE_EPOCH`, sends heartbeats. | Phase 3 |
+| `QuorumReplicator : IReplicator` | leader | Leadership terms, waits until a quorum has a write, steps down with `NotLeaderException`. With no peers configured it confirms on this broker alone. | Phase 3 ✅ |
+| `TopicReplication` | leader | Per topic: each follower's verified match, the HW (with the current-epoch rule), and the pending waits. | Phase 3 ✅ |
+| `PeerReplicator` | leader | One loop per follower and topic: reads from `ILog` at `nextOffset`, sends `Append`, handles ok, `LOG_MISMATCH` and `STALE_EPOCH`, sends heartbeats, backs off on failures. | Phase 3 ✅ |
 | `LeaderPromotion` | new leader | The promotion step from section 10.1, once agreed with D. | Phase 4 |
 
-Until phase 3, `IReplicator` is still `InstantReplicator`: the leader alone confirms writes.
+`IReplicator` is `QuorumReplicator`. With no peers configured (a single broker, e.g. `dotnet run`), it confirms writes on this broker alone and logs a warning.
 
 Configuration lives in the replication block's own section, so there is no contract change. Everything is optional; the values shown are the defaults, except `Peers`:
 
@@ -306,12 +307,15 @@ Configuration lives in the replication block's own section, so there is no contr
     "broker-2": "http://broker-2.broker:9091"
   },
   "RpcTimeout": "00:00:02",
+  "HeartbeatInterval": "00:00:00.500",
+  "RetryBackoff": "00:00:00.100",
+  "MaxRetryBackoff": "00:00:02",
   "MaxBatchRecords": 500,
   "MaxBatchBytes": 1048576
 }
 ```
 
-Out-of-range values stop the broker at startup. Like any setting, these can be overridden with environment variables (`Replication__RpcTimeout=00:00:05`). Phase 3 adds `HeartbeatInterval`.
+Out-of-range values stop the broker at startup. Like any setting, these can be overridden with environment variables (`Replication__RpcTimeout=00:00:05`).
 
 ### 8.2 The test harness
 
@@ -322,10 +326,11 @@ Most of replication is tested without D's Lease or A's disk log. The helpers liv
 - **`ReplicationTestServer`**: the replication block on its own, served by Kestrel over real HTTP/2 on a free loopback port, registered and mapped exactly like in the real host.
 - **`TestRecords`**: builders for records and requests.
 
-Phase 3 adds what the leader loops need:
+Added in phase 3 for the leader side:
 
-- **An in-process network with fault injection**: disconnect a node, delay it, drop the next N calls, "crash" it (keep its log, lose its memory state). It will be a decorator over `IReplicationPeer`.
-- **`FakeTimeProvider`** for heartbeats and timeouts. This needs `Microsoft.Extensions.TimeProvider.Testing` in `Directory.Packages.props`, which is a shared file, so tell the group first.
+- **`FaultyPeer`**: the network between the leader and one follower, as a decorator over `IReplicationPeer`. The test can disconnect it, pause calls, lose the next response, or swap the follower behind it (a restart with an empty log).
+- **`ReplicationCluster`**: a leader and two followers in one process, wired through `FaultyPeer`s.
+- **`FakeTimeProvider`** (package `Microsoft.Extensions.TimeProvider.Testing`, in the shared `Directory.Packages.props`) plus **`Eventually`**: time only moves while a test waits for something, so backoffs and heartbeats happen without real waiting.
 
 | Scenario | Checks | Phase |
 | --- | --- | --- |
@@ -335,12 +340,12 @@ Phase 3 adds what the leader loops need:
 | Queue events | Replicate exactly like messages (`Type` ≠ 0 changes nothing). | 2 ✅ |
 | Fetch and GetState | Batches split by count and by size, `max_records`, HW reported, invalid requests rejected. | 2 ✅ |
 | Over real gRPC | A record fetched from one broker and appended to another arrives byte-identical. Fencing, a 6 MiB record, error statuses, unreachable broker. | 2 ✅ |
-| 3 healthy nodes | Append, quorum, leader HW; followers learn the HW on the next round. | 3 |
-| One follower down | Writes still confirm (2 of 3). This is the phase 3 done criterion. | 3 |
-| Both followers down | `WaitForQuorumAsync` waits until cancelled; the HW doesn't move. | 3 |
-| Follower restarts empty | Catches up from offset 0 and rejoins the quorum. | 3 |
-| Leader with an old epoch | Gets `STALE_EPOCH`; its pending waits fail with `NotLeaderException`. | 3 |
-| Demoted while waiting | `NotLeaderException`. | 3 |
+| 3 healthy nodes | Append, quorum, leader HW; followers learn the HW on the next round. | 3 ✅ |
+| One follower down | Writes still confirm (2 of 3). This is the phase 3 done criterion. | 3 ✅ |
+| Both followers down | `WaitForQuorumAsync` waits until cancelled; the HW doesn't move. | 3 ✅ |
+| Follower restarts empty | Catches up from offset 0 and rejoins the quorum, in process and over real gRPC. | 3 ✅ |
+| Leader with an old epoch | Gets `STALE_EPOCH`; its pending waits fail with `NotLeaderException`. | 3 ✅ |
+| Demoted while waiting | `NotLeaderException`. | 3 ✅ |
 | Failover | A confirmed record survives a leader change, after the promotion step. | 4 |
 | Real log | The same suite passes against A's log, not only `InMemoryLog`. | When A's log lands |
 
@@ -377,7 +382,7 @@ Sending step 3 again changes nothing, because the record is already there. Sendi
 ### 8.4 Plugging it in
 
 1. Already done: `AddK0sReplication` registers gRPC and `MapK0sReplication` maps the service. It is mapped on every Kestrel endpoint, but port 9090 only speaks HTTP/1.1 and gRPC needs HTTP/2, so in practice it is reachable only on 9091.
-2. Phase 3: replace `InstantReplicator` with `QuorumReplicator` in `AddK0sReplication`. `HostTests` already checks that an `IReplicator` is registered.
+2. Done in phase 3: `AddK0sReplication` registers `QuorumReplicator` as `IReplicator`, with the peers from `PeerDirectory`.
 3. When A's log lands, rerun the suite against it.
 4. When D's Lease lands, run the failover scenarios against it.
 
@@ -389,7 +394,7 @@ Sending step 3 again changes nothing, because the record is already there. Sendi
 | --- | --- | --- | --- |
 | 1. PoC | until 7 Oct | Nothing new: `InstantReplicator` is already registered. Help A with tests. | — |
 | 2. Queue + gRPC | 8–14 Oct | ✅ gRPC service (`Append` with every check, `Fetch`, `GetState`), `AppendHandler`, `IReplicationPeer` and its gRPC client, test harness. | grpcurl replicates one record between two local processes (section 8.3). |
-| 3. Quorum | 15–21 Oct | `QuorumReplicator`, `PeerReplicator`, HW, catch-up, heartbeats. Fixed leader: broker-0. | Docker compose of 3: stop a follower and writes continue; restart it and it catches up. |
+| 3. Quorum | 15–21 Oct | ✅ `QuorumReplicator`, `PeerReplicator`, HW, catch-up, heartbeats (proven in-process and over gRPC). The 3-process demo waits for D's fixed leader (`Broker:LeaderId`). | Docker compose of 3: stop a follower and writes continue; restart it and it catches up. |
 | 4. Failover | 22–28 Oct | Fencing, stepping down, leader promotion with D. | Kill the leader: another takes over in < 15 s with no confirmed message lost. |
 | 5. Chaos | 29 Oct–4 Nov | Chaos scenarios for lagging and diverged followers. | "0 confirmed messages lost in N runs". |
 

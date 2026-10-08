@@ -20,6 +20,9 @@ internal sealed class GrpcReplicationPeer(GrpcReplication.ReplicationClient clie
         {
             MaxReceiveMessageSize = ReplicationOptions.MaxMessageSize,
             MaxSendMessageSize = ReplicationOptions.MaxMessageSize,
+
+            // The default (2 minutes) would keep a restarted broker unreachable for far longer than the restart.
+            MaxReconnectBackoff = TimeSpan.FromSeconds(5),
         });
 
     public async Task<AppendResponse> AppendAsync(AppendRequest request, CancellationToken ct = default)

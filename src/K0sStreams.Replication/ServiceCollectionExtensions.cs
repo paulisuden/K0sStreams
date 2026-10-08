@@ -1,10 +1,11 @@
 using K0sStreams.Contracts;
-using K0sStreams.Contracts.Fakes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace K0sStreams.Replication;
 
@@ -17,7 +18,8 @@ public static class ServiceCollectionExtensions
             .Bind(configuration.GetSection(ReplicationOptions.SectionName))
             .Validate(
                 static options => options.IsValid(),
-                "Replication: RpcTimeout, MaxBatchRecords and MaxBatchBytes must be positive, MaxBatchBytes at most 16 MiB, and every peer an absolute URL.")
+                "Replication: RpcTimeout, HeartbeatInterval, RetryBackoff, MaxBatchRecords and MaxBatchBytes must be positive, "
+                + "MaxRetryBackoff at least RetryBackoff, MaxBatchBytes at most 16 MiB, and every peer an absolute URL.")
             .ValidateOnStart();
 
         services.TryAddSingleton(TimeProvider.System);
@@ -31,8 +33,15 @@ public static class ServiceCollectionExtensions
             options.MaxSendMessageSize = ReplicationOptions.MaxMessageSize;
         });
 
-        // Phase 3 replaces this with the quorum replicator. Until then writes are confirmed by the leader alone.
-        services.AddSingleton<IReplicator, InstantReplicator>();
+        // Created after PeerDirectory, so the container stops its loops before closing the channels they use.
+        services.AddSingleton<IReplicator>(sp => new QuorumReplicator(
+            sp.GetRequiredService<ILog>(),
+            sp.GetRequiredService<IClusterState>(),
+            sp.GetRequiredService<EpochTracker>(),
+            sp.GetRequiredService<PeerDirectory>().Peers,
+            sp.GetRequiredService<IOptions<ReplicationOptions>>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetRequiredService<ILogger<QuorumReplicator>>()));
         return services;
     }
 

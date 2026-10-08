@@ -5,6 +5,7 @@ using K0sStreams.Contracts.Fakes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using GrpcReplication = K0sStreams.Contracts.Grpc.Replication;
@@ -35,15 +36,27 @@ internal sealed class ReplicationTestServer : IAsyncDisposable
 
     public IReplicationPeer Client { get; }
 
-    public static async Task<ReplicationTestServer> StartAsync(string nodeId, long epoch = 1)
+    /// <summary>The broker's gRPC address, e.g. <c>http://127.0.0.1:41234</c>.</summary>
+    public string Url => _app.Urls.Single();
+
+    public int Port => new Uri(Url).Port;
+
+    /// <summary>The broker's real <see cref="IReplicator"/>, as registered by <c>AddK0sReplication</c>.</summary>
+    public IReplicator Replicator => _app.Services.GetRequiredService<IReplicator>();
+
+    /// <param name="settings">Extra configuration, e.g. <c>Replication:Peers</c>.</param>
+    /// <param name="port">0 for any free port; a fixed one to restart a broker at the same address.</param>
+    public static async Task<ReplicationTestServer> StartAsync(
+        string nodeId, long epoch = 1, bool isLeader = false, Dictionary<string, string?>? settings = null, int port = 0)
     {
         var log = new InMemoryLog();
-        var cluster = new ControllableClusterState(nodeId, isLeader: false, epoch);
+        var cluster = new ControllableClusterState(nodeId, isLeader, epoch);
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
+        builder.Configuration.AddInMemoryCollection(settings ?? []);
         builder.WebHost.ConfigureKestrel(kestrel =>
-            kestrel.Listen(IPAddress.Loopback, 0, listen => listen.Protocols = HttpProtocols.Http2));
+            kestrel.Listen(IPAddress.Loopback, port, listen => listen.Protocols = HttpProtocols.Http2));
         builder.Services.AddSingleton<ILog>(log);
         builder.Services.AddSingleton<IClusterState>(cluster);
         builder.Services.AddK0sReplication(builder.Configuration);

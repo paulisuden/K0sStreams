@@ -16,6 +16,15 @@ public sealed class ReplicationOptions
     /// <summary>Deadline of unary calls (Append, GetState) to another broker.</summary>
     public TimeSpan RpcTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
+    /// <summary>An idle leader sends each follower an empty Append this often, so followers learn the high watermark.</summary>
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>First wait before retrying a follower that failed or could not be reached. It doubles on each failure.</summary>
+    public TimeSpan RetryBackoff { get; set; } = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>Longest wait between retries to a follower that keeps failing.</summary>
+    public TimeSpan MaxRetryBackoff { get; set; } = TimeSpan.FromSeconds(2);
+
     /// <summary>Most records in one batch sent to another broker.</summary>
     public int MaxBatchRecords { get; set; } = 500;
 
@@ -24,6 +33,9 @@ public sealed class ReplicationOptions
 
     internal bool IsValid() =>
         RpcTimeout > TimeSpan.Zero
+        && HeartbeatInterval > TimeSpan.Zero
+        && RetryBackoff > TimeSpan.Zero
+        && MaxRetryBackoff >= RetryBackoff
         && MaxBatchRecords > 0
         && MaxBatchBytes is > 0 and <= RecordCodec.MaxRecordSize
         && Peers.Values.All(static address => address.IsAbsoluteUri);

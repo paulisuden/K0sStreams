@@ -6,6 +6,98 @@ Newest iteration first. Add a new section at the top for each one.
 
 ---
 
+## Iteration 2 · Phase 3: the leader side (quorum)
+
+| | |
+| --- | --- |
+| Date | 8 Oct 2026 |
+| Branch | `feature/replicacion` |
+| Phase | 3 (15–21 Oct), done ahead of schedule |
+| Status | Done on the branch, not merged into `main` yet. The 3-process demo waits for D (see below). |
+
+### In short
+
+The leader side exists:
+- **Confirmation needs a majority.** A write counts as confirmed only once 2 of 3 brokers have it.
+- **Followers are fed by loops.** One loop per follower keeps it up to date, catches it up if it fell behind, and sends heartbeats.
+- **A replaced leader stops confirming.** As soon as it learns it was replaced, it confirms nothing more.
+
+`IReplicator` is now `QuorumReplicator`. With no peers configured (a single broker), it still confirms at once, so single-broker use is unchanged.
+
+Also in this iteration, every topic is a single log on the replication side ([DEC-001](decisions.md)), with partition 0 pinned in `SingleLog.cs`.
+
+### What was built
+
+| File | What it does |
+| --- | --- |
+| `QuorumReplicator.cs` | The `IReplicator`. It manages leadership terms, waits until a quorum has a write, and steps down (`NotLeaderException`) on `EpochChanged`, on a follower's `STALE_EPOCH`, or at shutdown. With no peers configured, it runs in single-broker mode. |
+| `TopicReplication.cs` | Per topic and term: each follower's verified match, the high watermark (advanced only for a record of the current epoch), and the pending waits. |
+| `PeerReplicator.cs` | One loop per follower and topic. It pushes `Append` batches, steps back on `LOG_MISMATCH`, sends heartbeats when idle, and backs off on failures. |
+| `LeaderTerm.cs`, `AsyncSignal.cs` | One period of leadership, stopped as a unit, and the signal that wakes a loop. |
+| `ReplicationOptions.cs` | New settings: `HeartbeatInterval` (500 ms), `RetryBackoff` (100 ms) and `MaxRetryBackoff` (2 s). |
+| `GrpcReplicationPeer.cs` | Reconnect backoff capped at 5 s. gRPC's default of 2 minutes would keep a restarted follower unreachable. |
+| `ServiceCollectionExtensions.cs` | Registers `QuorumReplicator` as `IReplicator`, with the peers from `PeerDirectory`. |
+
+Tests: 80 in total, 25 of them new.
+
+| Test class | Tests | Covers |
+| --- | --- | --- |
+| `QuorumReplicatorTests` | 21 | Quorum, followers down, slow or restarted, divergent tails, lost responses, 200 concurrent writes, the HW epoch rule, stepping down, cancellation, disposal, single-broker mode. |
+| `GrpcQuorumTests` | 1 | Three brokers over real gRPC: a follower stops, writes continue, it restarts on the same port and catches up. |
+| `RegistrationTests` | +3 | The registered `IReplicator`, and validation of the new settings. |
+
+New helpers: `FaultyPeer` (a link that can be disconnected, paused or lose a response), `ReplicationCluster` (a leader and two followers in one process, on fake time) and `Eventually`. `TestNode` and `ReplicationTestServer` can now act as the leader and take settings.
+
+### How it was checked
+
+- **Build:** `dotnet build` is clean.
+- **Tests:** every suite passes (Contracts 32, Storage 13, Broker 7, Replication 80), and the replication suite passed 5 more runs in a row.
+- **Phase 3 done criterion:**
+  - in process: `A_write_is_confirmed_with_one_follower_down` and `A_follower_restarted_empty_catches_up_and_counts_again`;
+  - over real gRPC: `Over_grpc_a_follower_down_does_not_block_writes_and_catches_up_after_restart`.
+- **Breaking two safety rules on purpose:**
+  - without the epoch rule, `The_high_watermark_waits_for_a_record_of_the_current_epoch` fails;
+  - with a step-back that stalls, `A_divergent_follower_tail_is_replaced` times out.
+- **Not checked:** the 3-process / docker compose demo, which needs D's fixed leader.
+
+### Decisions taken
+
+The one marked 👥 needs the team to know about it.
+
+1. 👥 **`Microsoft.Extensions.TimeProvider.Testing` (10.10.0) added to the shared `Directory.Packages.props`.** contexto.md already planned it for B's tests. Tests get a fake clock: time moves only while a test waits for something, so backoffs and heartbeats need no real waiting.
+2. **A follower's progress is what the request verified** (`prev_offset` + records sent), never the end offset the follower reports. Past the batch it may hold records nobody checked.
+3. **The high watermark only advances for a record of the leader's own epoch** (Raft's rule). Older records are confirmed together with the next current-epoch record.
+4. **Steady state is push only (`Append`).** `Fetch` stays for phase 4's promotion step.
+5. **One request in flight per follower.** A dead or slow follower never blocks the other.
+6. **No peers configured means single-broker mode**, with a warning in the log.
+
+### What the rest of the team should know
+
+Shared files: `Directory.Packages.props` gets one test package. `Contracts` is untouched.
+
+| Who | What |
+| --- | --- |
+| A, Storage | The leader counts its own copy as soon as `AppendAsync` returns, so `AppendAsync` must only return once the record is on disk (fsync). `SegmentedLog` currently writes without forcing it to disk (`Flush(true)`). With group commit, `EndOffset` must only cover durable records. |
+| B, Queue and API | After each append, call `WaitForQuorumAsync(topic, 0, offset, ct)` with a timeout (about 5 s) and answer 503 when it expires. Map `NotLeaderException` to 307 or 503. With both followers down, the wait lasts until your timeout. |
+| D, Platform | The 3-broker demo needs a fixed leader, for example `Broker:LeaderId` with `IsLeader = NodeId == LeaderId`. Today every broker is the leader at epoch 1, and two leaders would make the followers diverge. `Replication:Peers` must list the three brokers' gRPC addresses. Raise `EpochChanged` only after `IsLeader` and `CurrentEpoch` are updated. |
+
+### Known limitations, on purpose
+
+- A topic starts replicating on its first write in a term. An idle topic isn't pushed to a restarted follower until it gets a new write.
+- There's no `EpochChange` record and no promotion step yet (phase 4, [replication.md §10.1](replication.md#101--failover-as-currently-described-can-lose-confirmed-messages-c-d-a)).
+- A divergent tail is stepped back about one offset per round trip.
+- With `InMemoryLog`, a restarted follower loses records it had acknowledged. That's inherent to the fake log, and the leader logs a warning.
+- A call that times out (`DeadlineExceeded`) still has no test of its own.
+
+### Next: iteration 3 · Phase 4 (22–28 Oct)
+
+- The promotion step for a new leader (§10.1). It needs team agreement on `ILeaderPromotion` and two proto fields.
+- An `EpochChange` record at the start of each term.
+- Followers refusing `Append`s while they are themselves the leader, once D's real cluster state exists.
+- The 3-process / docker compose demo, once D's fixed leader exists.
+
+---
+
 ## Iteration 1 · Phase 2: gRPC between brokers
 
 | | |
