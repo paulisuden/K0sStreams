@@ -1,0 +1,53 @@
+# Tres brokers locales para las fases 2 y 3, sin Kubernetes. broker-0 es el líder fijo.
+#
+#   docker compose up --build -d
+#   docker compose stop broker-2      # apagar un seguidor
+#   docker compose down               # los datos quedan en los volúmenes; "down -v" los borra
+#
+#             HTTP (clientes)          gRPC (grpcurl)
+#   broker-0  http://localhost:9090    localhost:9091
+#   broker-1  http://localhost:9190    localhost:9191
+#   broker-2  http://localhost:9290    localhost:9291
+
+x-broker: &broker
+  build: .
+  image: k0sstreams/broker:dev
+  restart: unless-stopped
+
+# Igual para los tres. Dentro de la red de compose cada broker se llama por el nombre de su servicio.
+x-cluster: &cluster
+  Coordination__LeaderId: broker-0
+  Coordination__LeaderAddress: http://broker-0:9090
+  Replication__Peers__broker-0: http://broker-0:9091
+  Replication__Peers__broker-1: http://broker-1:9091
+  Replication__Peers__broker-2: http://broker-2:9091
+
+services:
+  broker-0:
+    <<: *broker
+    environment:
+      <<: *cluster
+      Broker__NodeId: broker-0
+    ports: ["9090:9090", "9091:9091"]
+    volumes: [data-0:/data]
+
+  broker-1:
+    <<: *broker
+    environment:
+      <<: *cluster
+      Broker__NodeId: broker-1
+    ports: ["9190:9090", "9191:9091"]
+    volumes: [data-1:/data]
+
+  broker-2:
+    <<: *broker
+    environment:
+      <<: *cluster
+      Broker__NodeId: broker-2
+    ports: ["9290:9090", "9291:9091"]
+    volumes: [data-2:/data]
+
+volumes:
+  data-0:
+  data-1:
+  data-2:

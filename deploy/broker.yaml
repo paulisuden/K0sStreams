@@ -1,0 +1,83 @@
+# Broker en Kubernetes: Service headless + StatefulSet con un PVC por pod.
+#
+# En minikube:
+#   minikube start --driver=docker
+#   minikube image build -t k0sstreams/broker:dev .     # la imagen queda adentro de minikube, sin registry
+#   kubectl apply -f deploy/
+#   kubectl rollout status statefulset/broker
+#   kubectl port-forward pod/broker-0 9090:9090          # http://localhost:9090/swagger
+#
+# Fase 1: un solo pod. En la fase 3 se sube replicas a 3 y se agrega el Service LoadBalancer (MetalLB).
+
+# Headless: le da a cada pod un DNS estable (broker-0.broker), que es lo que usan LeaderAddress y Replication:Peers.
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker
+  labels:
+    app: broker
+spec:
+  clusterIP: None
+  selector:
+    app: broker
+  ports:
+    - name: http
+      port: 9090
+    - name: grpc
+      port: 9091
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: broker
+  labels:
+    app: broker
+spec:
+  serviceName: broker
+  replicas: 1
+  selector:
+    matchLabels:
+      app: broker
+  template:
+    metadata:
+      labels:
+        app: broker
+    spec:
+      securityContext:
+        # La imagen corre como $APP_UID (1654) y el PVC se monta como root: sin esto no puede escribir /data.
+        fsGroup: 1654
+      containers:
+        - name: broker
+          image: k0sstreams/broker:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: Broker__NodeId
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: http
+              containerPort: 9090
+            - name: grpc
+              containerPort: 9091
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
