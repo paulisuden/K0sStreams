@@ -15,6 +15,6 @@ internal interface IReplicationPeer
     /// <summary>Records from <c>from_offset</c> up to <c>max_records</c> (or to the end of the log when it is 0), in batches.</summary>
     IAsyncEnumerable<RecordBatch> FetchAsync(FetchRequest request, CancellationToken ct = default);
 
-    /// <summary>Epoch, end offset, high watermark and role of the broker for one partition.</summary>
+    /// <summary>Epoch, end offset, high watermark and role of the broker for one topic.</summary>
     Task<StateResponse> GetStateAsync(StateRequest request, CancellationToken ct = default);
 }

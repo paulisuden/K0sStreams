@@ -9,24 +9,24 @@ namespace K0sStreams.Replication;
 /// <summary>
 /// Follower side of <c>Append</c> (docs/replication.md, section 5.3): fencing by epoch, consistency check against the
 /// record before the batch, truncation of a divergent tail, append, and the follower's high watermark.
-/// Appends to the same partition run one at a time.
+/// Appends to the same topic run one at a time. Every topic is a single log (see <see cref="SingleLog"/>).
 /// </summary>
 internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogger<AppendHandler> logger) : IDisposable
 {
     /// <summary>Value of <c>prev_offset</c> when the batch starts at offset 0.</summary>
     private const long NoPrevious = -1;
 
-    private readonly ConcurrentDictionary<(string Topic, int Partition), SemaphoreSlim> _gates = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
 
     public async Task<AppendResponse> HandleAsync(AppendRequest request, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!PartitionAddress.IsValid(request.Topic, request.Partition))
+        if (!SingleLog.IsValid(request.Topic, request.Partition))
         {
-            return Reject(AppendError.UnknownTopic, epochs.Current, NoPrevious, $"Invalid topic '{request.Topic}' or partition {request.Partition}.");
+            return Reject(AppendError.UnknownTopic, epochs.Current, NoPrevious, $"Invalid topic '{request.Topic}', or partition {request.Partition}: every topic is a single log, partition {SingleLog.Partition}.");
         }
 
-        var gate = _gates.GetOrAdd((request.Topic, request.Partition), static _ => new SemaphoreSlim(1, 1));
+        var gate = _gates.GetOrAdd(request.Topic, static _ => new SemaphoreSlim(1, 1));
 
         // Make sure that  only one append to the same topic runs at a time, 
         // so that the log is not corrupted and the high watermark is advanced correctly.
@@ -53,58 +53,57 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
     private async Task<AppendResponse> AppendAsync(AppendRequest request, CancellationToken ct)
     {
         string topic = request.Topic;
-        int partition = request.Partition;
 
         long localEpoch = epochs.Current;
         if (request.Epoch < localEpoch)
         {
-            return Reject(AppendError.StaleEpoch, localEpoch, log.EndOffset(topic, partition), $"Epoch {request.Epoch} is older than the local epoch {localEpoch}.");
+            return Reject(AppendError.StaleEpoch, localEpoch, log.EndOffset(topic), $"Epoch {request.Epoch} is older than the local epoch {localEpoch}.");
         }
 
         // A newer epoch is adopted even if the checks below fail: from here on the previous leader is fenced.
         localEpoch = epochs.Observe(request.Epoch);
 
-        if (!await HasRecordAsync(topic, partition, request.PrevOffset, request.PrevEpoch, ct).ConfigureAwait(false))
+        if (!await HasRecordAsync(topic, request.PrevOffset, request.PrevEpoch, ct).ConfigureAwait(false))
         {
-            return Reject(AppendError.LogMismatch, localEpoch, log.EndOffset(topic, partition), $"No record with offset {request.PrevOffset} and epoch {request.PrevEpoch}.");
+            return Reject(AppendError.LogMismatch, localEpoch, log.EndOffset(topic), $"No record with offset {request.PrevOffset} and epoch {request.PrevEpoch}.");
         }
 
         if (!TryDecode(request, out var records, out string? error))
         {
-            return Reject(AppendError.CorruptRecord, localEpoch, log.EndOffset(topic, partition), error);
+            return Reject(AppendError.CorruptRecord, localEpoch, log.EndOffset(topic), error);
         }
 
         // Skip records that are already in the log (same offset and epoch)
-        int firstNew = await SkipExistingAsync(topic, partition, records, ct).ConfigureAwait(false);
+        int firstNew = await SkipExistingAsync(topic, records, ct).ConfigureAwait(false);
         for (int i = firstNew; i < records.Length; i++)
         {
-            await log.AppendAsync(topic, partition, records[i], ct).ConfigureAwait(false);
+            await log.AppendAsync(topic, records[i], ct).ConfigureAwait(false);
         }
 
         // Only the prefix verified against the leader may be marked as confirmed: past it, this log can still hold
         // records from an old leader.
         long highWatermark = Math.Min(request.LeaderHw, request.PrevOffset + records.Length);
-        if (highWatermark > log.HighWatermark(topic, partition))
+        if (highWatermark > log.HighWatermark(topic))
         {
-            log.AdvanceHighWatermark(topic, partition, highWatermark);
+            log.AdvanceHighWatermark(topic, highWatermark);
         }
 
-        return new AppendResponse { Ok = true, Epoch = localEpoch, EndOffset = log.EndOffset(topic, partition) };
+        return new AppendResponse { Ok = true, Epoch = localEpoch, EndOffset = log.EndOffset(topic) };
     }
 
-    private async ValueTask<bool> HasRecordAsync(string topic, int partition, long offset, long epoch, CancellationToken ct)
+    private async ValueTask<bool> HasRecordAsync(string topic, long offset, long epoch, CancellationToken ct)
     {
         if (offset == NoPrevious)
         {
             return true;
         }
 
-        if (offset < NoPrevious || offset > log.EndOffset(topic, partition))
+        if (offset < NoPrevious || offset > log.EndOffset(topic))
         {
             return false;
         }
 
-        await foreach (var record in log.ReadAsync(topic, partition, offset, 1, ct).ConfigureAwait(false))
+        await foreach (var record in log.ReadAsync(topic, offset, 1, ct).ConfigureAwait(false))
         {
             return record.Epoch == epoch;
         }
@@ -155,9 +154,9 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
     /// record). If the next one conflicts with a local record, truncates the log before it. A batch that only repeats
     /// what the log has never truncates anything.
     /// </summary>
-    private async ValueTask<int> SkipExistingAsync(string topic, int partition, Record[] records, CancellationToken ct)
+    private async ValueTask<int> SkipExistingAsync(string topic, Record[] records, CancellationToken ct)
     {
-        long endOffset = log.EndOffset(topic, partition);
+        long endOffset = log.EndOffset(topic);
         if (records.Length == 0 || records[0].Offset > endOffset)
         {
             return 0;
@@ -165,7 +164,7 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
 
         int overlap = (int)(Math.Min(endOffset, records[^1].Offset) - records[0].Offset + 1);
         int matching = 0;
-        await foreach (var existing in log.ReadAsync(topic, partition, records[0].Offset, overlap, ct).ConfigureAwait(false))
+        await foreach (var existing in log.ReadAsync(topic, records[0].Offset, overlap, ct).ConfigureAwait(false))
         {
             if (existing.Epoch != records[matching].Epoch)
             {
@@ -177,24 +176,24 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
 
         if (matching < records.Length && records[matching].Offset <= endOffset)
         {
-            await TruncateDivergentTailAsync(topic, partition, records[matching].Offset - 1, endOffset, ct).ConfigureAwait(false);
+            await TruncateDivergentTailAsync(topic, records[matching].Offset - 1, endOffset, ct).ConfigureAwait(false);
         }
 
         return matching;
     }
 
-    private async ValueTask TruncateDivergentTailAsync(string topic, int partition, long toOffset, long endOffset, CancellationToken ct)
+    private async ValueTask TruncateDivergentTailAsync(string topic, long toOffset, long endOffset, CancellationToken ct)
     {
-        LogTruncating(logger, topic, partition, toOffset, endOffset);
+        LogTruncating(logger, topic, toOffset, endOffset);
         try
         {
-            await log.TruncateAsync(topic, partition, toOffset, ct).ConfigureAwait(false);
+            await log.TruncateAsync(topic, toOffset, ct).ConfigureAwait(false);
         }
         catch (InvalidOperationException ex)
         {
             // The leader disagrees with a record this broker already counted as confirmed. That breaks the
             // replication invariants: never hide it.
-            LogConflictWithConfirmedData(logger, ex, topic, partition, toOffset + 1);
+            LogConflictWithConfirmedData(logger, ex, topic, toOffset + 1);
             throw;
         }
     }
@@ -202,9 +201,9 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
     private static AppendResponse Reject(AppendError code, long epoch, long endOffset, string error) =>
         new() { Ok = false, Code = code, Epoch = epoch, EndOffset = endOffset, Error = error };
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Truncating the divergent tail of {Topic}/{Partition}: keeping up to offset {ToOffset}, the local end offset was {EndOffset}.")]
-    private static partial void LogTruncating(ILogger logger, string topic, int partition, long toOffset, long endOffset);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Truncating the divergent tail of {Topic}: keeping up to offset {ToOffset}, the local end offset was {EndOffset}.")]
+    private static partial void LogTruncating(ILogger logger, string topic, long toOffset, long endOffset);
 
-    [LoggerMessage(Level = LogLevel.Critical, Message = "The leader's log conflicts with confirmed data in {Topic}/{Partition} at offset {Offset}. Refusing to truncate.")]
-    private static partial void LogConflictWithConfirmedData(ILogger logger, Exception exception, string topic, int partition, long offset);
+    [LoggerMessage(Level = LogLevel.Critical, Message = "The leader's log conflicts with confirmed data in {Topic} at offset {Offset}. Refusing to truncate.")]
+    private static partial void LogConflictWithConfirmedData(ILogger logger, Exception exception, string topic, long offset);
 }

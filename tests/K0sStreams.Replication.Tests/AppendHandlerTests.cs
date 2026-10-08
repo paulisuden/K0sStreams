@@ -32,7 +32,7 @@ public sealed class AppendHandlerTests : IDisposable
     public async Task Append_after_the_last_record_extends_the_log_and_follows_the_leaders_high_watermark()
     {
         await SeedAsync(_follower.Log, 1, 1);
-        _follower.Log.AdvanceHighWatermark(Topic, 0, 0);
+        _follower.Log.AdvanceHighWatermark(Topic, 0);
 
         var response = await AppendAsync(Append(1, 1, 1, leaderHw: 1, Message(2, 1), Message(3, 1)));
 
@@ -40,7 +40,7 @@ public sealed class AppendHandlerTests : IDisposable
         response.Epoch.Should().Be(1);
         response.EndOffset.Should().Be(3);
         (await EpochsAsync(_follower.Log)).Should().Equal(1, 1, 1, 1);
-        _follower.Log.HighWatermark(Topic, 0).Should().Be(1);
+        _follower.Log.HighWatermark(Topic).Should().Be(1);
     }
 
     [Fact]
@@ -53,7 +53,7 @@ public sealed class AppendHandlerTests : IDisposable
         response.Ok.Should().BeFalse();
         response.Code.Should().Be(AppendError.StaleEpoch);
         response.Epoch.Should().Be(3);
-        _follower.Log.EndOffset(Topic, 0).Should().Be(-1);
+        _follower.Log.EndOffset(Topic).Should().Be(-1);
     }
 
     [Fact]
@@ -85,7 +85,7 @@ public sealed class AppendHandlerTests : IDisposable
 
         response.Code.Should().Be(AppendError.LogMismatch);
         response.EndOffset.Should().Be(1);
-        _follower.Log.EndOffset(Topic, 0).Should().Be(1);
+        _follower.Log.EndOffset(Topic).Should().Be(1);
     }
 
     [Fact]
@@ -96,7 +96,7 @@ public sealed class AppendHandlerTests : IDisposable
         var response = await AppendAsync(Append(2, 1, 2, -1, Message(2, 2)));
 
         response.Code.Should().Be(AppendError.LogMismatch);
-        _follower.Log.EndOffset(Topic, 0).Should().Be(1);
+        _follower.Log.EndOffset(Topic).Should().Be(1);
     }
 
     [Fact]
@@ -110,7 +110,7 @@ public sealed class AppendHandlerTests : IDisposable
         var response = await AppendAsync(request);
 
         response.Code.Should().Be(AppendError.CorruptRecord);
-        _follower.Log.EndOffset(Topic, 0).Should().Be(-1);
+        _follower.Log.EndOffset(Topic).Should().Be(-1);
     }
 
     [Fact]
@@ -131,7 +131,7 @@ public sealed class AppendHandlerTests : IDisposable
         var response = await AppendAsync(Append(1, -1, 0, -1, Message(0, 1), Message(2, 1)));
 
         response.Code.Should().Be(AppendError.CorruptRecord);
-        _follower.Log.EndOffset(Topic, 0).Should().Be(-1);
+        _follower.Log.EndOffset(Topic).Should().Be(-1);
     }
 
     [Theory]
@@ -151,8 +151,8 @@ public sealed class AppendHandlerTests : IDisposable
     [InlineData("", 0)]
     [InlineData("Orders", 0)]
     [InlineData("orders", -1)]
-    [InlineData("orders", 64)]
-    public async Task Invalid_topic_or_partition_is_rejected(string topic, int partition)
+    [InlineData("orders", 1)]
+    public async Task Invalid_topic_or_a_partition_other_than_0_is_rejected(string topic, int partition)
     {
         var request = Append(1, -1, 0, -1, Message(0, 1));
         request.Topic = topic;
@@ -216,7 +216,7 @@ public sealed class AppendHandlerTests : IDisposable
 
         (await AppendAsync(Append(1, 2, 1, leaderHw: 2))).Ok.Should().BeTrue();
 
-        _follower.Log.HighWatermark(Topic, 0).Should().Be(2);
+        _follower.Log.HighWatermark(Topic).Should().Be(2);
     }
 
     [Fact]
@@ -226,7 +226,7 @@ public sealed class AppendHandlerTests : IDisposable
 
         await AppendAsync(Append(1, 1, 1, leaderHw: 3));
 
-        _follower.Log.HighWatermark(Topic, 0).Should().Be(1);
+        _follower.Log.HighWatermark(Topic).Should().Be(1);
     }
 
     [Fact]
@@ -237,14 +237,14 @@ public sealed class AppendHandlerTests : IDisposable
 
         await AppendAsync(Append(1, 2, 1, leaderHw: 0));
 
-        _follower.Log.HighWatermark(Topic, 0).Should().Be(2);
+        _follower.Log.HighWatermark(Topic).Should().Be(2);
     }
 
     [Fact]
     public async Task Conflict_with_confirmed_records_is_refused()
     {
         await SeedAsync(_follower.Log, 1, 1);
-        _follower.Log.AdvanceHighWatermark(Topic, 0, 1);
+        _follower.Log.AdvanceHighWatermark(Topic, 1);
 
         var act = () => AppendAsync(Append(2, 0, 1, -1, Message(1, 2)));
 
@@ -259,12 +259,12 @@ public sealed class AppendHandlerTests : IDisposable
 
         (await AppendAsync(Append(1, -1, 0, -1, Message(0, 1, "order"), ack))).Ok.Should().BeTrue();
 
-        var stored = await _follower.Log.ReadAsync(Topic, 0, 1, 1).SingleAsync();
+        var stored = await _follower.Log.ReadAsync(Topic, 1, 1).SingleAsync();
         QueueEvent.FromRecord(stored).Should().Be(new QueueEvent(RecordType.Ack, "billing", 0, 0, 0));
     }
 
     [Fact]
-    public async Task Concurrent_appends_to_the_same_partition_do_not_interfere()
+    public async Task Concurrent_appends_to_the_same_topic_do_not_interfere()
     {
         var request = Append(1, -1, 0, -1, Sequence(1, 1, 1, 1, 1));
 

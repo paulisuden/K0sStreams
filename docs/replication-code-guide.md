@@ -175,7 +175,7 @@ The tests skip the network by calling the follower's `ReplicationNode` directly.
 
 - **`Append`**: hands the request to `AppendHandler`.
 - **`Fetch`**: reads from the log starting at the requested offset, up to `max_records` or the end of the log. It ignores the high watermark, because followers need unconfirmed records too. Records are re-encoded with `RecordCodec` and grouped into batches of at most `MaxBatchRecords` records and roughly `MaxBatchBytes` bytes. Each batch carries this broker's current high watermark.
-- **`GetState`**: returns epoch, end offset, high watermark, node id and leader flag for one partition.
+- **`GetState`**: returns epoch, end offset, high watermark, node id and leader flag for one topic.
 
 Invalid requests (bad topic name, out-of-range partition, negative offset) fail with an `RpcException` carrying `InvalidArgument`, the same error a remote broker returns.
 
@@ -195,7 +195,7 @@ Invalid requests (bad topic name, out-of-range partition, negative offset) fail 
 6. **Append** the rest.
 7. **Move the high watermark** up to whatever the leader says is confirmed, but never past what this request just verified.
 
-Requests for the same partition run one at a time (a lock per partition). A conflict with a record the follower already counted as confirmed is never truncated: it's logged as critical and the call fails.
+Requests for the same topic run one at a time (a lock per topic). A conflict with a record the follower already counted as confirmed is never truncated: it's logged as critical and the call fails.
 
 **Why it matters.** It's the heart of the block, and the only class that changes a follower's disk. A bug here can lose or corrupt confirmed messages, which is the one thing the project promises never to do. That's why it has the largest test class, and why the reasoning behind each step is written down in [replication.md §5.3](replication.md#53-what-a-follower-does-with-an-append).
 
@@ -255,13 +255,16 @@ Failures surface as `RpcException`: `Unavailable` when the broker can't be reach
 
 **Why it matters.** It's the block's only configuration surface. Checking at startup means a typo in a deployment stops the broker immediately, with a clear message, instead of silently breaking replication later.
 
-### 5.3 `PartitionAddress`
+### 5.3 `SingleLog`
 
-[PartitionAddress.cs](../src/K0sStreams.Replication/PartitionAddress.cs)
+[SingleLog.cs](../src/K0sStreams.Replication/SingleLog.cs)
 
-**What it does.** One method, `IsValid(topic, partition)`. It applies the same rules as topic creation (`TopicConfig.IsValidName`, partition within range).
+**What it does.** Every topic is a single log ([DEC-001](decisions.md)), but `ILog` and `replication.proto` still have a partition until the contracts change. This class pins it to 0 in one place:
 
-**Why it matters.** Topic names become folder names on disk, and gRPC requests come from the network. Every operation calls this before touching the log, so a request for a topic like `../etc` never reaches A's storage code.
+- `IsValid(topic, partition)`: a valid topic name (the same rules as topic creation) and no partition other than 0.
+- `ILog` overloads without the partition (`log.EndOffset(topic)`, `log.AppendAsync(topic, record)`…). The rest of the block uses them, so it already reads as it will after the contracts change.
+
+**Why it matters.** Topic names become folder names on disk, and gRPC requests come from the network. Every operation calls `IsValid` before touching the log, so a request for a topic like `../etc` never reaches A's storage code. When the Contracts PR for DEC-001 lands, this file is deleted and nothing else in the block changes.
 
 ---
 
