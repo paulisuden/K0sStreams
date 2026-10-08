@@ -480,3 +480,6 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Plan de trabajo personal (no se comparte)
+docs/plan-almacenamiento.md
