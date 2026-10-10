@@ -43,9 +43,16 @@ public sealed class SegmentedLogTests : IDisposable
     {
         (await _log.AppendAsync("t", 0, Msg("a"))).Should().Be(0);
         (await _log.AppendAsync("t", 0, Msg("b"))).Should().Be(1);
-        (await _log.AppendAsync("t", 1, Msg("c"))).Should().Be(0);
 
         _log.EndOffset("t", 0).Should().Be(1);
+    }
+
+    [Fact]
+    public void Una_particion_distinta_de_cero_se_rechaza()
+    {
+        // DEC-001: un tópico es un único log. Mientras ILog siga llevando el parámetro,
+        // cualquier valor que no sea 0 se rechaza en vez de ignorarse en silencio.
+        _log.Invoking(l => l.EndOffset("t", 1)).Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
