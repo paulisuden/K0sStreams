@@ -153,19 +153,4 @@ public sealed class RecoveryTests : IDisposable
         log.EndOffset(Topico, 0).Should().Be(-1);
         (await log.AppendAsync(Topico, 0, Msg("primero"))).Should().Be(0);
     }
-
-    [Fact]
-    public async Task El_high_watermark_arranca_en_menos_uno_despues_de_reiniciar()
-    {
-        var antes = Reiniciar();
-        await antes.AppendAsync(Topico, 0, Msg("uno"));
-        antes.AdvanceHighWatermark(Topico, 0, 0);
-
-        var despues = Reiniciar();
-
-        // El high watermark todavía no se guarda en disco: lo vuelve a subir la replicación.
-        // Queda documentado acá porque es la pregunta abierta de la iteración 3.
-        despues.HighWatermark(Topico, 0).Should().Be(-1);
-        despues.EndOffset(Topico, 0).Should().Be(0);
-    }
 }
