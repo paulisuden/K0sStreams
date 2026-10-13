@@ -29,6 +29,9 @@ public sealed class SegmentedLog : ILog
     /// <summary>Nombre del segmento: el primer offset que contiene, con 20 dígitos.</summary>
     private const string SegmentNameFormat = "D20";
 
+    /// <summary>Archivo con el high watermark del tópico, al lado del segmento.</summary>
+    private const string CheckpointFileName = "checkpoint";
+
     private readonly ConcurrentDictionary<string, TopicLog> _topics = new(StringComparer.Ordinal);
 
     /// <param name="dataDir">Carpeta raíz de los datos. En Docker es <c>/data</c> (configuración <c>Broker:DataDir</c>).</param>
@@ -171,7 +174,17 @@ public sealed class SegmentedLog : ILog
         {
             long end = log.Positions.Count - 1;
             ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, end);
-            log.HighWatermark = Math.Max(log.HighWatermark, offset);
+
+            long advanced = Math.Max(log.HighWatermark, offset);
+            if (advanced == log.HighWatermark)
+            {
+                return;
+            }
+
+            // Primero el disco y después la memoria, igual que con el índice: si la escritura
+            // falla, el valor en memoria no afirma algo que el disco no respalda.
+            WriteCheckpoint(log, advanced);
+            log.HighWatermark = advanced;
         }
     }
 
@@ -214,6 +227,24 @@ public sealed class SegmentedLog : ILog
         stream.Flush(flushToDisk: true);
     }
 
+    /// <summary>
+    /// Guarda el high watermark. A diferencia del log, no lleva <c>fsync</c>: se llama una vez por
+    /// escritura y pagarlo duplicaría el costo. Perder la última actualización ante un corte es seguro,
+    /// porque deja al broker creyendo que tiene menos confirmado de lo que tiene, nunca más.
+    /// </summary>
+    private static void WriteCheckpoint(TopicLog log, long offset) =>
+        File.WriteAllText(log.CheckpointFile, offset.ToString(CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// Lee el high watermark guardado. Un archivo que falta, vacío o ilegible vale -1: es un número
+    /// recalculable, no datos perdidos, y la replicación lo vuelve a subir en la próxima ronda.
+    /// </summary>
+    private static long ReadCheckpoint(TopicLog log) =>
+        File.Exists(log.CheckpointFile)
+        && long.TryParse(File.ReadAllText(log.CheckpointFile), NumberStyles.Integer, CultureInfo.InvariantCulture, out long saved)
+            ? saved
+            : Record.Unassigned;
+
     /// <summary>Un largo de registro que podría ser real; cualquier otro indica bytes dañados.</summary>
     private static bool IsPlausibleLength(int payloadLength) =>
         payloadLength >= RecordCodec.HeaderSize - sizeof(int) && payloadLength <= RecordCodec.MaxRecordSize - sizeof(int);
@@ -252,26 +283,28 @@ public sealed class SegmentedLog : ILog
     /// </summary>
     private static void RebuildIndex(TopicLog log)
     {
-        if (!File.Exists(log.LogFile))
+        if (File.Exists(log.LogFile))
         {
-            return;
+            long valid;
+            long total;
+            using (var stream = new FileStream(log.LogFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                total = stream.Length;
+                valid = ScanRecords(log, stream);
+            }
+
+            log.Length = valid;
+            if (valid < total)
+            {
+                // Lo que sobra es una escritura que quedó por la mitad: el proceso murió escribiéndola.
+                // Se descarta sin culpa, porque ese AppendAsync nunca llegó a devolver un offset.
+                Cut(log.LogFile, valid);
+            }
         }
 
-        long valid;
-        long total;
-        using (var stream = new FileStream(log.LogFile, FileMode.Open, FileAccess.Read, FileShare.Read))
-        {
-            total = stream.Length;
-            valid = ScanRecords(log, stream);
-        }
-
-        log.Length = valid;
-        if (valid < total)
-        {
-            // Lo que sobra es una escritura que quedó por la mitad: el proceso murió escribiéndola.
-            // Se descarta sin culpa, porque ese AppendAsync nunca llegó a devolver un offset.
-            Cut(log.LogFile, valid);
-        }
+        // El high watermark se guarda aparte del log. Se acota al end offset por si el checkpoint
+        // quedó adelantado: nunca se puede dar por confirmado algo que no está escrito.
+        log.HighWatermark = Math.Min(ReadCheckpoint(log), log.Positions.Count - 1);
     }
 
     /// <summary>Recorre el segmento anotando cada registro y devuelve hasta dónde llegó lo válido.</summary>
@@ -334,6 +367,7 @@ public sealed class SegmentedLog : ILog
             DirectoryPath = Path.Combine(dataDir, topic);
             string segment = 0L.ToString(SegmentNameFormat, CultureInfo.InvariantCulture) + LogExtension;
             LogFile = Path.Combine(DirectoryPath, segment);
+            CheckpointFile = Path.Combine(DirectoryPath, CheckpointFileName);
         }
 
         public Lock Gate { get; } = new();
@@ -342,12 +376,16 @@ public sealed class SegmentedLog : ILog
 
         public string LogFile { get; }
 
+        /// <summary>Archivo donde sobrevive el high watermark entre reinicios.</summary>
+        public string CheckpointFile { get; }
+
         /// <summary>Índice en memoria: la posición <c>i</c> guarda en qué byte del archivo empieza el offset <c>i</c>.</summary>
         public List<long> Positions { get; } = [];
 
         /// <summary>Bytes válidos del segmento, o sea dónde va a caer el próximo registro.</summary>
         public long Length { get; set; }
 
+        /// <summary>Último offset confirmado por quórum. Se refleja en <see cref="CheckpointFile"/>.</summary>
         public long HighWatermark { get; set; } = -1;
 
         /// <summary>Si ya se leyó el archivo para reconstruir <see cref="Positions"/>.</summary>
