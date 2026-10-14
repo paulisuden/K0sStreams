@@ -13,9 +13,8 @@ namespace K0sStreams.Storage;
 /// high watermark.
 /// </summary>
 /// <remarks>
-/// Estado: escribe con <c>fsync</c>, rota segmentos, los indexa en disco de forma dispersa y
-/// recuerda el high watermark entre reinicios. Todavía no agrupa los <c>fsync</c> y no borra
-/// segmentos viejos.
+/// Estado: escribe con <c>fsync</c> agrupado, rota segmentos, los indexa en disco de forma
+/// dispersa y recuerda el high watermark entre reinicios. Todavía no borra segmentos viejos.
 /// </remarks>
 public sealed class SegmentedLog : ILog
 {
@@ -54,13 +53,34 @@ public sealed class SegmentedLog : ILog
     /// <summary>Carpeta raíz donde se guardan los segmentos.</summary>
     public string DataDir { get; }
 
+    /// <summary>
+    /// Cuántos <c>fsync</c> de segmentos se hicieron desde que arrancó. Lo miran los tests: es la
+    /// medida de si el group commit agrupa o si cada mensaje paga el suyo.
+    /// </summary>
+    internal int FsyncCount => _topics.Values.Sum(log => log.Writer.FsyncCount);
+
     /// <inheritdoc />
-    public ValueTask<long> AppendAsync(string topic, int partition, Record record, CancellationToken ct = default)
+    public async ValueTask<long> AppendAsync(
+        string topic, int partition, Record record, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(record);
         ct.ThrowIfCancellationRequested();
 
         var log = Get(topic, partition);
+        long offset = Write(log, record);
+
+        // Acá está el group commit: el candado ya se soltó, así que mientras este registro espera al
+        // disco otros pueden escribir, y el fsync que confirme a este los confirma a todos.
+        await log.Writer.WaitUntilDurableAsync(offset).ConfigureAwait(false);
+        return offset;
+    }
+
+    /// <summary>
+    /// Deja el registro en el archivo y devuelve su offset. Todavía no está en el disco: de eso se
+    /// encarga <see cref="GroupCommitWriter"/>, fuera del candado.
+    /// </summary>
+    private long Write(TopicLog log, Record record)
+    {
         lock (log.Gate)
         {
             long next = log.NextOffset;
@@ -75,14 +95,10 @@ public sealed class SegmentedLog : ILog
             var segment = SegmentFor(log, bytes.Length);
             bool creating = !File.Exists(segment.FilePath);
 
-            using (var stream = new FileStream(segment.FilePath, FileMode.Append, FileAccess.Write, FileShare.Read))
+            // Compartido para escritura: el committer abre el mismo archivo para hacerle el fsync.
+            using (var stream = new FileStream(segment.FilePath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
             {
                 stream.Write(bytes);
-
-                // El contrato de ILog dice que el offset se devuelve cuando el registro está EN DISCO.
-                // Sin este true los bytes quedarían en el caché del sistema operativo y un corte de luz
-                // los perdería. Es la línea que sostiene "no se pierden mensajes confirmados".
-                stream.Flush(flushToDisk: true);
             }
 
             if (creating)
@@ -95,7 +111,11 @@ public sealed class SegmentedLog : ILog
 
             // Recién ahora se actualiza el índice: si la escritura falla, el estado en memoria no miente.
             segment.Append(segment.Length, bytes.Length);
-            return ValueTask.FromResult(next);
+
+            // Con el stream cerrado, los bytes ya están en el sistema operativo. Desde este punto,
+            // un fsync del archivo los baja al disco aunque lo pida otra escritura.
+            log.Writer.Wrote(segment.FilePath, next);
+            return next;
         }
     }
 
@@ -165,10 +185,10 @@ public sealed class SegmentedLog : ILog
     public long EndOffset(string topic, int partition)
     {
         var log = Get(topic, partition);
-        lock (log.Gate)
-        {
-            return log.NextOffset - 1;
-        }
+
+        // Lo escrito sin fsync todavía no cuenta. Es la misma regla de siempre (la memoria nunca
+        // afirma algo que el disco no respalda), ahora sostenida con escrituras en vuelo.
+        return log.Writer.DurableOffset;
     }
 
     /// <inheritdoc />
@@ -177,7 +197,7 @@ public sealed class SegmentedLog : ILog
         var log = Get(topic, partition);
         lock (log.Gate)
         {
-            ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, log.NextOffset - 1);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, log.Writer.DurableOffset);
 
             long advanced = Math.Max(log.HighWatermark, offset);
             if (advanced == log.HighWatermark)
@@ -193,12 +213,18 @@ public sealed class SegmentedLog : ILog
     }
 
     /// <inheritdoc />
-    public ValueTask TruncateAsync(string topic, int partition, long toOffset, CancellationToken ct = default)
+    public async ValueTask TruncateAsync(
+        string topic, int partition, long toOffset, CancellationToken ct = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(toOffset, Record.Unassigned);
         ct.ThrowIfCancellationRequested();
 
         var log = Get(topic, partition);
+
+        // Primero se deja que lo escrito termine de bajar al disco. Si no, un append en vuelo
+        // esperaría un fsync sobre un archivo que mientras tanto se recortó.
+        await log.Writer.CommitPendingAsync().ConfigureAwait(false);
+
         lock (log.Gate)
         {
             if (toOffset < log.HighWatermark)
@@ -210,7 +236,7 @@ public sealed class SegmentedLog : ILog
             long firstGone = toOffset + 1;
             if (firstGone >= log.NextOffset)
             {
-                return ValueTask.CompletedTask;
+                return;
             }
 
             // Los segmentos enteramente posteriores al corte se borran; del que lo contiene se
@@ -229,9 +255,11 @@ public sealed class SegmentedLog : ILog
             cut.DropFrom(firstGone);
             cut.Length = newLength;
             Cut(cut.FilePath, newLength);
-        }
 
-        return ValueTask.CompletedTask;
+            // Cut ya hizo su propio fsync, así que lo que queda es durable. Y lo que se recortó no
+            // puede seguir contando como escrito.
+            log.Writer.Reset(toOffset);
+        }
     }
 
     /// <summary>
@@ -262,8 +290,11 @@ public sealed class SegmentedLog : ILog
         var tramos = new List<(string FilePath, long Start, long Skip, int Count)>();
         lock (log.Gate)
         {
-            long from = Math.Min(fromOffset, log.NextOffset);
-            long remaining = Math.Min(max, log.NextOffset - from);
+            // Hasta lo durable, no hasta lo escrito: no se sirve un registro que el disco todavía
+            // no respalda.
+            long end = log.Writer.DurableOffset + 1;
+            long from = Math.Min(fromOffset, end);
+            long remaining = Math.Min(max, end - from);
 
             for (int i = log.IndexOf(from); remaining > 0 && i >= 0 && i < log.Segments.Count; i++)
             {
@@ -327,7 +358,7 @@ public sealed class SegmentedLog : ILog
     /// <summary>Recorta el archivo y confirma el recorte en disco.</summary>
     private static void Cut(string file, long length)
     {
-        using var stream = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.Read);
+        using var stream = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
         stream.SetLength(length);
         stream.Flush(flushToDisk: true);
     }
@@ -410,6 +441,9 @@ public sealed class SegmentedLog : ILog
                 ScanSegment(log, segment, isLast: i == baseOffsets.Count - 1);
             }
         }
+
+        // Lo que se acaba de leer del disco es durable por definición.
+        log.Writer.Reset(log.NextOffset - 1);
 
         // El high watermark se guarda aparte. Se acota al end offset por si el checkpoint quedó
         // adelantado: nunca se puede dar por confirmado algo que no está escrito.
@@ -558,6 +592,9 @@ public sealed class SegmentedLog : ILog
         }
 
         public Lock Gate { get; } = new();
+
+        /// <summary>Quien agrupa los <c>fsync</c> de este tópico y sabe hasta dónde llega el disco.</summary>
+        public GroupCommitWriter Writer { get; } = new();
 
         public string DirectoryPath { get; }
 

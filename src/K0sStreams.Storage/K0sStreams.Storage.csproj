@@ -7,4 +7,8 @@
     <ProjectReference Include="../K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="K0sStreams.Storage.Tests" />
+  </ItemGroup>
+
 </Project>
