@@ -64,9 +64,16 @@ internal sealed class GroupCommitWriter
                 // Va al pool de hilos y no al que llama: si el fsync corriera acá mismo, el primer
                 // append bloquearía los milisegundos del disco antes de devolver el control, los que
                 // vienen detrás no alcanzarían a escribir, y no habría nada que agrupar.
+                //
+                // PreferFairness lo manda a la cola global del pool, detrás de los appends que ya
+                // estaban encolados. Sin eso va a la cola local del hilo, que se atiende en LIFO:
+                // al llegar al await de abajo, este mismo hilo volvería al pool y lo primero que
+                // agarraría es el fsync que acaba de encolar, antes de dejar escribir a nadie más.
+                // Con pocos núcleos eso deja un fsync por append, que es lo contrario del objetivo.
                 if (_commit.IsCompleted)
                 {
-                    _commit = Task.Run(Commit);
+                    _commit = Task.Factory.StartNew(
+                        Commit, CancellationToken.None, TaskCreationOptions.PreferFairness, TaskScheduler.Default);
                 }
 
                 commit = _commit;
