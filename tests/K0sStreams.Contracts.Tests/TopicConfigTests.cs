@@ -21,10 +21,10 @@ public class TopicConfigTests
 
     [Fact]
     public void Configuracion_valida_no_tiene_errores() =>
-        new TopicConfig("pedidos", 1, 3, TimeSpan.FromSeconds(5)).Validate().Should().BeEmpty();
+        new TopicConfig("pedidos", 3, TimeSpan.FromSeconds(5)).Validate().Should().BeEmpty();
 
     [Fact]
     public void Configuracion_invalida_reporta_cada_campo() =>
-        new TopicConfig("MAL", 0, -1, TimeSpan.FromSeconds(-1)).Validate().Keys
-            .Should().BeEquivalentTo("Name", "Partitions", "MaxRetries", "RetryBackoff");
+        new TopicConfig("MAL", -1, TimeSpan.FromSeconds(-1)).Validate().Keys
+            .Should().BeEquivalentTo("Name", "MaxRetries", "RetryBackoff");
 }
