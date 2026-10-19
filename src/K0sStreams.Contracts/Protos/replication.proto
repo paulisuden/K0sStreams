@@ -18,7 +18,8 @@ service Replication {
 message AppendRequest {
   int64 epoch = 1;
   string topic = 2;
-  int32 partition = 3;
+  // 3 estuvo reservado a partition: cada tópico es un solo log (DEC-001). No reusar.
+  reserved 3;
   // Offset y época del registro anterior al primero del lote (-1 y 0 si el log está vacío).
   // El seguidor rechaza con LOG_MISMATCH si no los tiene iguales: así detecta que su log divergió.
   int64 prev_offset = 4;
@@ -50,7 +51,8 @@ message AppendResponse {
 message FetchRequest {
   int64 epoch = 1;
   string topic = 2;
-  int32 partition = 3;
+  // 3 estuvo reservado a partition: cada tópico es un solo log (DEC-001). No reusar.
+  reserved 3;
   int64 from_offset = 4;
   int32 max_records = 5;
 }
@@ -62,7 +64,8 @@ message RecordBatch {
 
 message StateRequest {
   string topic = 1;
-  int32 partition = 2;
+  // 2 estuvo reservado a partition: cada tópico es un solo log (DEC-001). No reusar.
+  reserved 2;
 }
 
 message StateResponse {

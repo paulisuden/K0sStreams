@@ -6,12 +6,12 @@ namespace K0sStreams.Contracts.Fakes;
 /// <summary><see cref="ILog"/> en memoria, sin persistencia. Reemplazo temporal del log de Storage.</summary>
 public sealed class InMemoryLog : ILog
 {
-    private readonly ConcurrentDictionary<(string Topic, int Partition), PartitionLog> _partitions = new();
+    private readonly ConcurrentDictionary<string, TopicLog> _topics = new();
 
-    public ValueTask<long> AppendAsync(string topic, int partition, Record record, CancellationToken ct = default)
+    public ValueTask<long> AppendAsync(string topic, Record record, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(record);
-        var log = Get(topic, partition);
+        var log = Get(topic);
         lock (log.Gate)
         {
             long next = log.Records.Count;
@@ -26,12 +26,12 @@ public sealed class InMemoryLog : ILog
     }
 
     public async IAsyncEnumerable<Record> ReadAsync(
-        string topic, int partition, long fromOffset, int max, [EnumeratorCancellation] CancellationToken ct = default)
+        string topic, long fromOffset, int max, [EnumeratorCancellation] CancellationToken ct = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(fromOffset);
         ArgumentOutOfRangeException.ThrowIfNegative(max);
         Record[] slice;
-        var log = Get(topic, partition);
+        var log = Get(topic);
         lock (log.Gate)
         {
             int start = (int)Math.Min(fromOffset, log.Records.Count);
@@ -47,27 +47,27 @@ public sealed class InMemoryLog : ILog
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
-    public long HighWatermark(string topic, int partition)
+    public long HighWatermark(string topic)
     {
-        var log = Get(topic, partition);
+        var log = Get(topic);
         lock (log.Gate)
         {
             return log.HighWatermark;
         }
     }
 
-    public long EndOffset(string topic, int partition)
+    public long EndOffset(string topic)
     {
-        var log = Get(topic, partition);
+        var log = Get(topic);
         lock (log.Gate)
         {
             return log.Records.Count - 1;
         }
     }
 
-    public void AdvanceHighWatermark(string topic, int partition, long offset)
+    public void AdvanceHighWatermark(string topic, long offset)
     {
-        var log = Get(topic, partition);
+        var log = Get(topic);
         lock (log.Gate)
         {
             ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, log.Records.Count - 1);
@@ -75,9 +75,9 @@ public sealed class InMemoryLog : ILog
         }
     }
 
-    public ValueTask TruncateAsync(string topic, int partition, long toOffset, CancellationToken ct = default)
+    public ValueTask TruncateAsync(string topic, long toOffset, CancellationToken ct = default)
     {
-        var log = Get(topic, partition);
+        var log = Get(topic);
         lock (log.Gate)
         {
             if (toOffset < log.HighWatermark)
@@ -93,9 +93,9 @@ public sealed class InMemoryLog : ILog
         return ValueTask.CompletedTask;
     }
 
-    private PartitionLog Get(string topic, int partition) => _partitions.GetOrAdd((topic, partition), _ => new PartitionLog());
+    private TopicLog Get(string topic) => _topics.GetOrAdd(topic, _ => new TopicLog());
 
-    private sealed class PartitionLog
+    private sealed class TopicLog
     {
         public Lock Gate { get; } = new();
 
