@@ -1,5 +1,7 @@
+using K0sStreams.Broker.Api;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Fakes;
+using K0sStreams.Queue;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -10,7 +12,7 @@ builder.Services.AddSingleton<IClusterState>(new StaticClusterState(nodeId));   
 builder.Services.AddSingleton<ITopicCatalog, InMemoryTopicCatalog>();          // A: Storage
 builder.Services.AddSingleton<ILog, InMemoryLog>();                            // A: Storage
 builder.Services.AddSingleton<IReplicator, InstantReplicator>();               // C: Replication
-// B: registrar IQueueEngine (Queue) y mapear los endpoints REST de docs/ARQUITECTURA.md.
+builder.Services.AddK0sQueue(builder.Configuration);                           // B: Queue
 
 builder.Services.AddProblemDetails();
 builder.Services.AddEndpointsApiExplorer();
@@ -25,6 +27,7 @@ app.UseSwaggerUI();
 
 app.MapHealthChecks("/health");
 app.MapHealthChecks("/ready");
+app.MapK0sApi();            // B
 
 app.Run();
 
