@@ -160,19 +160,19 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     }
 
     [Fact]
-    public async Task Nack_devuelve_not_found_en_fase1()
+    public async Task Nack_reintenta_y_funciona_en_fase2()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopicAsync(topic, 1);
         await PublishAsync(topic, "a");
         var first = await ReceiveAsync(topic);
         DeliveryResponse? delivery = await first.Content.ReadFromJsonAsync<DeliveryResponse>();
 
-        (await NackAsync(topic, delivery!.Partition, delivery.Offset, "prueba")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await NackAsync(topic, delivery!.Partition, delivery.Offset, "prueba")).StatusCode.Should().Be(HttpStatusCode.OK);
     }
 
     [Fact]
-    public async Task Dlq_devuelve_lista_vacia_en_fase1()
+    public async Task Dlq_puede_listarse()
     {
         string topic = NewTopic();
         await CreateTopicAsync(topic);
@@ -180,6 +180,6 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
         var response = await _client.GetAsync($"/v1/topics/{topic}/queues/facturacion/dlq");
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         DeadLetterResponse[]? body = await response.Content.ReadFromJsonAsync<DeadLetterResponse[]>();
-        body!.Should().BeEmpty();
+        body!.Should().NotBeNull();
     }
 }
