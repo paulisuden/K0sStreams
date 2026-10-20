@@ -40,6 +40,16 @@ public sealed class QueueEngineTests
         }
     }
 
+    private async ValueTask AppendScheduledAsync(string topic, int partition, long deliverAtMs, params string[] values)
+    {
+        foreach (string value in values)
+        {
+            var record = new Record(Record.Unassigned, 1, RecordType.Message, _time.GetUtcNow().ToUnixTimeMilliseconds(), deliverAtMs, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value));
+            long offset = await _log.AppendAsync(topic, partition, record);
+            await _replicator.WaitForQuorumAsync(topic, partition, offset);
+        }
+    }
+
     private Record Message(string value) =>
         Record.NewMessage(1, _time.GetUtcNow().ToUnixTimeMilliseconds(), ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value));
 
@@ -54,9 +64,9 @@ public sealed class QueueEngineTests
         return records;
     }
 
-    private async ValueTask CreateTopicAsync(string topic = "pedidos", int partitions = 1)
+    private async ValueTask CreateTopicAsync(string topic = "pedidos", int partitions = 1, int maxRetries = 3, TimeSpan? retryBackoff = null)
     {
-        (await _catalog.CreateAsync(new TopicConfig(topic, partitions, 3, TimeSpan.FromSeconds(5)))).Should().BeTrue();
+        (await _catalog.CreateAsync(new TopicConfig(topic, partitions, maxRetries, retryBackoff ?? TimeSpan.FromSeconds(5)))).Should().BeTrue();
     }
 
     [Fact]
@@ -199,6 +209,55 @@ public sealed class QueueEngineTests
         var second = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
 
         second!.Attempt.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Nack_devuelve_el_mensaje_con_backoff_y_aumenta_intento()
+    {
+        await CreateTopicAsync("pedidos", 1, 3, TimeSpan.FromSeconds(1));
+        await AppendMessagesAsync("pedidos", 0, "a");
+        var first = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        first!.Attempt.Should().Be(1);
+
+        (await _engine.NackAsync("pedidos", "facturacion", 0, first.Offset, "fallo")).Should().BeTrue();
+        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+
+        _time.Advance(TimeSpan.FromSeconds(2));
+        var second = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        second!.Attempt.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Nack_lleva_a_DLQ_cuando_se_superan_reintentos()
+    {
+        await CreateTopicAsync("pedidos", 1, 1, TimeSpan.FromSeconds(1));
+        await AppendMessagesAsync("pedidos", 0, "a");
+        var first = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        (await _engine.NackAsync("pedidos", "facturacion", 0, first!.Offset, "fallo")).Should().BeTrue();
+
+        _time.Advance(TimeSpan.FromSeconds(2));
+        var second = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        (await _engine.NackAsync("pedidos", "facturacion", 0, second!.Offset, "fallo2")).Should().BeTrue();
+
+        var dlq = _engine.GetDeadLetters("pedidos", "facturacion");
+        dlq.Should().ContainSingle();
+        dlq[0].Offset.Should().Be(0);
+        dlq[0].Attempts.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Mensaje_programado_no_se_entrega_hasta_deliverAt()
+    {
+        await CreateTopicAsync("pedidos", 1, 3, TimeSpan.FromSeconds(1));
+        long future = Epoch.AddSeconds(60).ToUnixTimeMilliseconds();
+        await AppendScheduledAsync("pedidos", 0, future, "a");
+
+        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+
+        _time.Advance(TimeSpan.FromSeconds(61));
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        delivery.Should().NotBeNull();
+        delivery!.Offset.Should().Be(0);
     }
 
     [Fact]

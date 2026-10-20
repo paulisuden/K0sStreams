@@ -24,12 +24,12 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             throw new ArgumentOutOfRangeException(nameof(visibility), visibility, "La visibilidad tiene que ser mayor que cero.");
         }
 
-        _ = catalog.Find(topic) ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+        TopicConfig? topicConfig = catalog.Find(topic) ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
         QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
 
         // Se lee hasta el high watermark, no hasta el end offset: un mensaje que todavía no
         // llegó a quórum no se puede entregar. Los eventos de cola del log se saltean.
-        int partitions = catalog.Find(topic)!.Partitions;
+        int partitions = topicConfig.Partitions;
         long from = 0;
         foreach (int partition in PartitionsRange(partitions))
         {
@@ -55,6 +55,11 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                     }
 
                     DateTimeOffset now = time.GetUtcNow();
+                    if (record.DeliverAt > 0 && record.DeliverAt > now.ToUnixTimeMilliseconds())
+                    {
+                        continue;
+                    }
+
                     DateTimeOffset visibleUntil = now.Add(visibility);
                     int? attempt = state.TryBeginAttempt(partition, record.Offset, now, visibleUntil);
                     if (attempt is null)
@@ -107,14 +112,65 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
     }
 
     /// <inheritdoc />
-    public ValueTask<bool> NackAsync(string topic, string queue, int partition, long offset, string? reason, CancellationToken ct = default)
+    public async ValueTask<bool> NackAsync(string topic, string queue, int partition, long offset, string? reason, CancellationToken ct = default)
     {
-        // Fase 2: reintentos con backoff y DLQ. Sin Nack no hay estado que cambiar.
-        return ValueTask.FromResult(false);
+        TopicConfig? topicConfig = catalog.Find(topic);
+        if (topicConfig is null)
+        {
+            return false;
+        }
+
+        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
+        int? attempt = state.GetAttempt(partition, offset);
+        if (attempt is null || attempt.Value == 0)
+        {
+            return false;
+        }
+
+        if (!state.TryRelease(partition, offset))
+        {
+            return false;
+        }
+
+        DateTimeOffset now = time.GetUtcNow();
+        if (attempt.Value > topicConfig.MaxRetries)
+        {
+            state.MarkDeadLetter(partition, offset);
+            await AppendEventAsync(
+                topic,
+                new QueueEvent(RecordType.Nack, queue, partition, offset, now.ToUnixTimeMilliseconds(), reason),
+                ct).ConfigureAwait(false);
+            return true;
+        }
+
+        double multiplier = Math.Pow(2, attempt.Value - 1);
+        TimeSpan delay = TimeSpan.FromTicks((long)(topicConfig.RetryBackoff.Ticks * multiplier));
+        if (delay < TimeSpan.Zero)
+        {
+            delay = topicConfig.RetryBackoff;
+        }
+        DateTimeOffset retryAt = now.Add(delay);
+        long untilMs = retryAt.ToUnixTimeMilliseconds();
+        state.ScheduleRetry(partition, offset, retryAt);
+
+        await AppendEventAsync(
+            topic,
+            new QueueEvent(RecordType.Nack, queue, partition, offset, untilMs, reason),
+            ct).ConfigureAwait(false);
+        return true;
     }
 
     /// <inheritdoc />
-    public IReadOnlyList<DeadLetter> GetDeadLetters(string topic, string queue) => [];
+    public IReadOnlyList<DeadLetter> GetDeadLetters(string topic, string queue)
+    {
+        if (catalog.Find(topic) is null)
+        {
+            return [];
+        }
+
+        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
+        return state.GetDeadLetters(topic, queue, log);
+    }
 
     /// <inheritdoc />
     public void Apply(string topic, Record queueEvent)
@@ -155,8 +211,11 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         private readonly object _gate = new();
         private readonly Dictionary<(int Partition, long Offset), int> _attempts = [];
         private readonly Dictionary<(int Partition, long Offset), DateTimeOffset> _visibleUntil = [];
+        private readonly Dictionary<(int Partition, long Offset), DateTimeOffset> _scheduledUntil = [];
         private readonly HashSet<(int Partition, long Offset)> _inFlight = [];
         private readonly HashSet<(int Partition, long Offset)> _acknowledged = [];
+        private readonly HashSet<(int Partition, long Offset)> _deadLettered = [];
+        private readonly Dictionary<(int Partition, long Offset), string?> _lastReason = [];
 
         /// <summary>
         /// Decide y confirma el intento bajo el mismo lock: si fueran dos pasos, dos receives
@@ -168,15 +227,29 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 var key = (partition, offset);
-                if (_acknowledged.Contains(key))
+                if (_acknowledged.Contains(key) || _deadLettered.Contains(key))
                 {
                     return null;
                 }
 
-                // En proceso y sin vencer: todavía no se puede volver a entregar.
-                if (_inFlight.Contains(key) && _visibleUntil.TryGetValue(key, out DateTimeOffset until) && now < until)
+                if (_scheduledUntil.TryGetValue(key, out DateTimeOffset scheduled) && now < scheduled)
                 {
                     return null;
+                }
+                if (_scheduledUntil.ContainsKey(key) && now >= scheduled)
+                {
+                    _scheduledUntil.Remove(key);
+                }
+
+                // En proceso y sin vencer: todavía no se puede volver a entregar.
+                if (_inFlight.Contains(key))
+                {
+                    if (_visibleUntil.TryGetValue(key, out DateTimeOffset until2) && now < until2)
+                    {
+                        return null;
+                    }
+                    _inFlight.Remove(key);
+                    _visibleUntil.Remove(key);
                 }
 
                 _inFlight.Add(key);
@@ -199,8 +272,101 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                 }
 
                 _visibleUntil.Remove(key);
+                _scheduledUntil.Remove(key);
                 _acknowledged.Add(key);
                 return true;
+            }
+        }
+
+        public int? GetAttempt(int partition, long offset)
+        {
+            lock (_gate)
+            {
+                var key = (partition, offset);
+                if (_acknowledged.Contains(key) || _deadLettered.Contains(key))
+                {
+                    return null;
+                }
+
+                if (!_inFlight.Contains(key) && !_scheduledUntil.ContainsKey(key))
+                {
+                    // could be in-flight? check
+                }
+
+                _attempts.TryGetValue(key, out int attempt);
+                if (attempt == 0)
+                {
+                    return null;
+                }
+                return attempt;
+            }
+        }
+
+        public bool TryRelease(int partition, long offset)
+        {
+            lock (_gate)
+            {
+                var key = (partition, offset);
+                if (!_inFlight.Contains(key))
+                {
+                    return false;
+                }
+
+                _inFlight.Remove(key);
+                _visibleUntil.Remove(key);
+                return true;
+            }
+        }
+
+        public void ScheduleRetry(int partition, long offset, DateTimeOffset until)
+        {
+            lock (_gate)
+            {
+                var key = (partition, offset);
+                _inFlight.Remove(key);
+                _visibleUntil.Remove(key);
+                _scheduledUntil[key] = until;
+            }
+        }
+
+        public void MarkDeadLetter(int partition, long offset)
+        {
+            lock (_gate)
+            {
+                var key = (partition, offset);
+                _deadLettered.Add(key);
+            }
+        }
+
+        public List<DeadLetter> GetDeadLetters(string topic, string queue, ILog log)
+        {
+            lock (_gate)
+            {
+                var result = new List<DeadLetter>();
+                foreach (var key in _deadLettered)
+                {
+                    try
+                    {
+                        Record? record = null;
+                        var enumerator = log.ReadAsync(topic, key.Partition, key.Offset, 1).GetAsyncEnumerator();
+                        if (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
+                        {
+                            record = enumerator.Current;
+                        }
+                        enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                        if (record is not null && record.Offset == key.Offset)
+                        {
+                            _attempts.TryGetValue(key, out int attempts);
+                            _lastReason.TryGetValue(key, out string? reason);
+                            result.Add(new DeadLetter(key.Partition, key.Offset, record, attempts, reason));
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+                return result;
             }
         }
 
@@ -216,8 +382,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                         // o un mensaje en proceso volvería a entregarse de inmediato.
                         _inFlight.Add(key);
                         _visibleUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.UntilMs);
-                        _attempts.TryGetValue(key, out int attempt);
-                        _attempts[key] = attempt + 1;
+                        _attempts.TryGetValue(key, out int attemptReceive);
+                        _attempts[key] = attemptReceive + 1;
                         break;
                     case RecordType.Ack:
                         _inFlight.Remove(key);
@@ -231,8 +397,23 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                         _inFlight.Remove(key);
                         _visibleUntil.Remove(key);
                         break;
+                    case RecordType.Nack:
+                        _inFlight.Remove(key);
+                        _visibleUntil.Remove(key);
+                        if (replayed.Reason is not null)
+                        {
+                            _lastReason[key] = replayed.Reason;
+                        }
+                        if (replayed.UntilMs > 0)
+                        {
+                            _scheduledUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.UntilMs);
+                        }
+                        else
+                        {
+                            _deadLettered.Add(key);
+                        }
+                        break;
                     default:
-                        // Nack es de la fase 2 (backoff y DLQ).
                         break;
                 }
             }
