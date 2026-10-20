@@ -6,6 +6,101 @@ Newest iteration first. Add a new section at the top for each one.
 
 ---
 
+## Iteration 3 · Phase 4: failover (leader promotion)
+
+| | |
+| --- | --- |
+| Date | 14 Oct 2026 |
+| Branch | `feature/replicacion`, on top of iteration 2 (`main` not merged in yet) |
+| Phase | 4 (22–28 Oct), done early at Franco's request. CLAUDE.md's rule 2 says not to get ahead of the plan; noted. |
+| Status | Done on the branch. The team has to approve [DEC-002](decisions.md) (a Contracts change and a plan change) before merging. It runs for real once D's Lease calls it. |
+
+### In short
+
+A broker that wins the Lease can now take over without losing a confirmed message. Before announcing itself, it:
+1. tells a majority about the new epoch, which fences the old leader;
+2. copies the records it's missing from the most complete log among them;
+3. marks the new epoch in every topic.
+
+Once coordination announces it, it replicates those marks, which confirms everything before them. The scenario in [replication-scenarios.md §18](replication-scenarios.md#18-not-guarded-yet), where a lagging broker becomes leader, is now a passing test.
+
+### What was built
+
+Contracts, in its own commit for its own PR: `ILeaderPromotion.cs`, and the `ListTopics` RPC in `replication.proto`.
+
+| File | What it does |
+| --- | --- |
+| `LeaderPromotion.cs` | `ILeaderPromotion`: for each topic, survey, copy, mark. One promotion runs at a time. It refuses if this broker already announced itself as leader, or if the epoch is older than one already seen. |
+| `PeerSurvey.cs` | Step 1. It gathers topics from a majority (`ListTopics`), then announces the epoch with an empty `Append` (which takes each topic's lock) and learns where each log ends. |
+| `MajorityCall.cs` | Asks brokers in parallel until enough answer, with a deadline per call and retries with backoff. A `NotLeaderException` stops it. |
+| `LogCatchUp.cs` | Step 2. It copies from the most complete log, from this broker's confirmed record to where the survey saw that log end, through this broker's own `Append` handling. |
+| `EpochChangeWriter.cs` | Step 3. It writes an `EpochChange` record at the end of the topic, once per epoch. |
+| `KnownTopics.cs`, `LogTip.cs`, `Backoff.cs`, `RecordBytes.cs` | The topics this broker holds; Raft's "more complete log" comparison; retry delays; record bytes on the wire. |
+| `AppendHandler.cs` | Records the topic before the epoch check, closing a race with `ListTopics`. Refuses a second leader of the epoch it leads. |
+| `QuorumReplicator.cs` | Records the topic before the leadership check. When coordination announces this broker as leader, it starts every known topic, so the epoch marks get confirmed without a client write. |
+| `ReplicationNode`, gRPC client and service, `IReplicationPeer` | `ListTopics`. |
+
+Tests: 128 in total, 48 of them new.
+
+| Test class | Tests | Covers |
+| --- | --- | --- |
+| `LeaderPromotionTests` | 14 | Three complete brokers in one process. Lagging broker elected; a leader whose HW lagged; the old leader's tail replaced; the old leader fenced; a replaced leader not yet told by coordination; a topic only a peer has; an empty topic; no majority; cancel and retry; same epoch twice; old leader re-elected; lone broker; refusals. |
+| `PeerSurveyTests` | 5 | Fencing, log ends, a newer epoch, topics from a majority, the announcement waiting for an `Append` in progress. |
+| `LogCatchUpTests` | 7 | Copy after the confirmed prefix, from the start, divergent tail, stop at the surveyed end, source changed, never overwriting a confirmed record, newer epoch. |
+| `MajorityCallTests` | 6 | Early return, retries, deadline, `NotLeaderException`, cancellation, no answers needed. |
+| `LogTipTests`, `EpochChangeWriterTests` | 6 + 3 | The comparison, the survey's choice, the mark. |
+| `AppendHandlerTests` | +4 | Two leaders refused; a replaced leader accepts the newer epoch, even after adopting it; topic recorded. |
+| `ReplicationNodeTests`, `GrpcReplicationTests`, `RegistrationTests` | +1 each | `ListTopics`, locally and over gRPC; `ILeaderPromotion` registered. |
+
+New helpers: `FailoverCluster` (three complete brokers, each linked to the others, which also plays coordination's part) and `BlockingLog` (an `Append` frozen halfway).
+
+### How it was checked
+
+- **Build:** `dotnet build` is clean.
+- **Tests:** every suite passes (Contracts 32, Storage 13, Broker 7, Replication 128), and the replication suite passed 10 runs in a row.
+- **Breaking four rules on purpose:** each was caught.
+  - The survey never prefers a peer's log: 3 tests fail.
+  - The flawed two-leaders guard from the first design: 2 tests fail.
+  - Topics from other brokers ignored: 2 tests fail.
+  - Topics not started on election: 2 tests time out.
+- **Not checked:**
+  - with D's real Lease, which doesn't exist yet;
+  - promotion between separate processes over gRPC (the in-process cluster uses the same classes, and `ListTopics` is tested over gRPC);
+  - against A's `SegmentedLog`.
+
+### Decisions taken
+
+1. 👥 **[DEC-002](decisions.md): promotion instead of truncating to the HW.** It adds `ILeaderPromotion` and `ListTopics` to Contracts, in their own PR.
+2. **The new leader writes to itself as if it were its own follower.** Its catch-up and epoch mark go through its own `Append` handling, so the epoch fence and every follower check apply. The design review suggested a separate path without the fence; that path could overwrite records written by an even newer leader.
+3. **The epoch is announced with an empty `Append`**, which takes the topic's lock. A new `GetState` field wouldn't, so it could race with an append the old leader still has in flight.
+4. **The two-leaders guard compares the request with the epoch coordination says this broker leads,** not with the newest epoch it has seen. A replaced leader that already saw the new epoch must still follow the new leader. My first version broke every failover; the regression tests above now catch that.
+5. **A topic name is recorded before the epoch check** (and before the leadership check on the leader). `ListTopics` then either lists the topic, or the old leader's record gets refused.
+6. **A topic with no record anywhere gets no `EpochChange`,** so stray names never create folders.
+
+### What the rest of the team should know
+
+| Who | What |
+| --- | --- |
+| A, Storage | Don't truncate on `EpochChanged`. To survive a full restart, replication needs the topics on disk: an `ILog` way to list topics, for the next Contracts batch. |
+| B, Queue and API | Skip `EpochChange` records in history and queues. Only write while `IsLeader`, stamping `CurrentEpoch` at append time. Around a failover, `WaitForQuorumAsync` throws `NotLeaderException`. |
+| D, Platform | Follow the obligations in `ILeaderPromotion`'s XML doc and in DEC-002: promote before announcing, cancel on Lease loss, one broker per epoch, the Lease's epoch after a restart, no constructor dependency. |
+
+### Known limitations, on purpose
+
+- `KnownTopics` lives in memory. If two brokers restart before a topic gets a new write, a new leader may not know that topic. The fix is the `ILog` topic listing.
+- Topics are promoted one after another, so failover time grows with the number of topics.
+- Two leaders of the same epoch can only be caught on a leader's own log; followers rely on D giving each epoch to one broker.
+- The epoch adopted from other brokers lives in memory; after a restart it relies on D reporting the Lease's epoch.
+- If B appends with the old epoch in the instant between its leadership check and the append, that record could land after the epoch mark. B should stamp `CurrentEpoch` at append time, and D clears `IsLeader` before promoting.
+
+### Next: phase 5 (chaos)
+
+- The `ILog` topic listing, with A.
+- Promotion with D's Lease and over gRPC between processes.
+- Chaos scenarios: the leader killed repeatedly, partitions, lagging followers, and "0 confirmed messages lost in N runs".
+
+---
+
 ## Iteration 2 · Phase 3: the leader side (quorum)
 
 | | |

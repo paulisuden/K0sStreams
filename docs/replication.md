@@ -293,7 +293,10 @@ The leader sends an empty `Append` to each follower every `HeartbeatInterval` (a
 | `QuorumReplicator : IReplicator` | leader | Leadership terms, waits until a quorum has a write, steps down with `NotLeaderException`. With no peers configured it confirms on this broker alone. | Phase 3 ✅ |
 | `TopicReplication` | leader | Per topic: each follower's verified match, the HW (with the current-epoch rule), and the pending waits. | Phase 3 ✅ |
 | `PeerReplicator` | leader | One loop per follower and topic: reads from `ILog` at `nextOffset`, sends `Append`, handles ok, `LOG_MISMATCH` and `STALE_EPOCH`, sends heartbeats, backs off on failures. | Phase 3 ✅ |
-| `LeaderPromotion` | new leader | The promotion step from section 10.1, once agreed with D. | Phase 4 |
+| `LeaderPromotion : ILeaderPromotion` | new leader | The promotion step from section 10.1: survey, catch up, mark the epoch. Called by D before it announces the new leader. | Phase 4 ✅ |
+| `PeerSurvey`, `MajorityCall` | new leader | Announce the epoch to a majority (fencing the old leader) and learn where each log ends; ask brokers in parallel until enough answer. | Phase 4 ✅ |
+| `LogCatchUp`, `EpochChangeWriter` | new leader | Copy what the most complete log has, through this broker's own `Append` handling; write the `EpochChange` record. | Phase 4 ✅ |
+| `KnownTopics` | both | Topics this broker holds, as replication has seen them; answered by `ListTopics`. In memory. | Phase 4 ✅ |
 
 `IReplicator` is `QuorumReplicator`. With no peers configured (a single broker, e.g. `dotnet run`), it confirms writes on this broker alone and logs a warning.
 
@@ -395,7 +398,7 @@ Sending step 3 again changes nothing, because the record is already there. Sendi
 | 1. PoC | until 7 Oct | Nothing new: `InstantReplicator` is already registered. Help A with tests. | — |
 | 2. Queue + gRPC | 8–14 Oct | ✅ gRPC service (`Append` with every check, `Fetch`, `GetState`), `AppendHandler`, `IReplicationPeer` and its gRPC client, test harness. | grpcurl replicates one record between two local processes (section 8.3). |
 | 3. Quorum | 15–21 Oct | ✅ `QuorumReplicator`, `PeerReplicator`, HW, catch-up, heartbeats (proven in-process and over gRPC). The 3-process demo waits for D's fixed leader (`Broker:LeaderId`). | Docker compose of 3: stop a follower and writes continue; restart it and it catches up. |
-| 4. Failover | 22–28 Oct | Fencing, stepping down, leader promotion with D. | Kill the leader: another takes over in < 15 s with no confirmed message lost. |
+| 4. Failover | 22–28 Oct | ✅ Leader promotion ([DEC-002](decisions.md)), fencing at the survey, refusing a second leader of the same epoch. Proven in process; runs for real once D's Lease calls `ILeaderPromotion`. | Kill the leader: another takes over in < 15 s with no confirmed message lost. |
 | 5. Chaos | 29 Oct–4 Nov | Chaos scenarios for lagging and diverged followers. | "0 confirmed messages lost in N runs". |
 
 ---
@@ -405,6 +408,8 @@ Sending step 3 again changes nothing, because the record is already there. Sendi
 Ordered by how much damage they can do. Nothing here blocks phases 2 and 3, which use a fixed leader.
 
 ### 10.1 🔴 Failover, as currently described, can lose confirmed messages (C, D, A)
+
+> **Status:** implemented in [iteration 3](replication-iterations.md) as described below, with two differences in the contract (see *Contract impact*). The plan change is [DEC-002](decisions.md), pending team approval.
 
 There are two separate problems.
 
@@ -455,7 +460,8 @@ Two rules go with it:
 
   Demotion needs no hook: replication already sees it through `IClusterState`.
 
-- In the proto: `StateRequest.epoch` (asking for state also fences the old leader) and `StateResponse.last_epoch` (epoch of the last record, to compare logs). New fields only, so old clients keep working. Until they exist there is a workaround: `Fetch(end_offset, 1)` returns the last record, and with it its epoch.
+- ~~In the proto: `StateRequest.epoch` and `StateResponse.last_epoch`.~~ Not needed, as built. The epoch is announced with an empty `Append` at the new epoch, which takes the topic's lock, so it can't race with an append the old leader has in flight; `GetState` doesn't take that lock. The last record's epoch comes from `Fetch(end_offset, 1)`.
+- In the proto instead: a `ListTopics` RPC. The new leader gathers topics from a majority, so it also reconciles topics it never received itself.
 
 ### 10.2 🟠 Who are my peers? (C, D)
 

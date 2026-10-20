@@ -2,7 +2,7 @@
 
 How replication behaves when everything works (part 1), what can go wrong, and what the code does about each case (part 2). Every scenario has a diagram, the guardrail that handles it, where that guardrail lives in the code, and the test that proves it.
 
-Reflects the code as of [iteration 2](replication-iterations.md) (phase 3): the follower side, the gRPC layer and the leader side. What's still missing is drawn in grey. For the reasoning behind the protocol see [replication.md](replication.md); for the classes, see the [code guide](replication-code-guide.md).
+Reflects the code as of [iteration 3](replication-iterations.md) (phase 4): the follower side, the gRPC layer, the leader side and failover. What's still missing is drawn in grey. For the reasoning behind the protocol see [replication.md](replication.md); for the classes, see the [code guide](replication-code-guide.md).
 
 **How to read the diagrams**
 
@@ -41,6 +41,7 @@ Reflects the code as of [iteration 2](replication-iterations.md) (phase 3): the 
 | [16](#16-the-other-broker-is-down-or-slow) | The other broker is down or slow | Deadlines on calls | `Unavailable` / `DeadlineExceeded` | `An_unreachable_broker_fails_with_unavailable` (slow path not tested yet) |
 | [17](#17-the-configuration-is-wrong) | Wrong configuration | Checked at startup; never a peer of itself | Broker refuses to start | `Out_of_range_settings_are_rejected`, `Peers_come_from_configuration_and_exclude_this_broker` |
 | [18](#18-not-guarded-yet) | What isn't guarded yet | — | — | — |
+| [19](#19-a-new-leader-takes-over) | A new leader takes over | Survey, catch-up, epoch mark | No confirmed record lost | `LeaderPromotionTests` |
 
 ---
 
@@ -674,18 +675,19 @@ These guardrails come in later phases or need a team decision. They're listed so
 
 | Scenario | What happens today | Planned guardrail | When |
 | --- | --- | --- | --- |
-| **The new leader is missing confirmed records** (the Lease went to a lagging broker) | A confirmed message can be lost; see the diagram below | Promotion step before accepting writes ([replication.md §10.1](replication.md#101--failover-as-currently-described-can-lose-confirmed-messages-c-d-a)) | Phase 4; needs team agreement |
-| **Two brokers both think they lead the same epoch** | `StaticClusterState` makes every broker "leader, epoch 1"; a follower would accept appends from both | Fixed leader from configuration (D), then the real Lease | Phase 3 (fixed leader), phase 4 (Lease) |
-| **The old leader reaches the last follower before the new leader does** | A write can still be confirmed under the old epoch for a moment (§2) | The promotion step announces the new epoch to every peer first (`StateRequest.epoch`) | Phase 4 |
+| **The new leader is missing confirmed records** (the Lease went to a lagging broker) | ✅ Covered: the promotion copies them from the most complete log of a majority (§19) | — | Done (iteration 3); D must call it ([DEC-002](decisions.md)) |
+| **Two brokers both think they lead the same epoch** | Partly covered: a leader refuses another leader of its own epoch (§19). A follower would still accept both | D gives each epoch to one broker (fixed leader now, the Lease later) | Relies on D |
+| **The old leader reaches the last follower before the new leader does** | ✅ Covered: the survey fences a majority under each topic's lock. A write the old leader got confirmed before that is on a broker the survey reaches, so it's kept | — | Done (iteration 3) |
 | **The old leader keeps going after `STALE_EPOCH`** | ✅ Covered: it adopts the newer epoch, fails pending writes with `NotLeaderException` and stops its loops | — | Done (iteration 2) |
 | **Both followers are down** | `QuorumReplicator` waits until the caller cancels; the HW doesn't move | B passes a timeout to `WaitForQuorumAsync` and answers 503 | When B's API lands |
 | **A broker restarts and forgets the epoch it adopted** | It falls back to D's epoch until a leader contacts it again | Persist the epoch, or read it from the last `EpochChange` record in the log | Later |
+| **Two brokers restart, then a failover, before a topic gets a new write** | `KnownTopics` lives in memory, so the new leader may not know that topic | List topics from `ILog` (A, next Contracts batch) | Before phase 5's chaos tests |
 | **A topic the follower has never heard of** | Accepted for any valid name | Replicated topic metadata ([§10.3](replication.md#103--topics-on-followers-a-b-c-open-topic-1-in-contextomd)) | Team decision |
 | **A malicious broker sends an absurd epoch** | Adopted, which fences the real leader | Out of scope: the project assumes no Byzantine faults | — |
 
-### The most important gap, step by step
+### The failover gap, step by step (closed in phase 4)
 
-How the follower-side guardrails above are *not enough* to protect a failover, and why phase 4's promotion step is needed:
+How the follower-side guardrails alone are *not enough* to protect a failover, and why the promotion step (§19) is needed:
 
 ```mermaid
 sequenceDiagram
@@ -706,4 +708,50 @@ sequenceDiagram
     end
 ```
 
-Every guardrail here does its job; the follower simply can't know that `42/e1` was confirmed, because it learns the HW one round late. The fix has to happen before broker-2 starts leading: it must first collect what the other broker has, as described in replication.md §10.1.
+Every guardrail here does its job; the follower simply can't know that `42/e1` was confirmed, because it learns the HW one round late. The fix has to happen before broker-2 starts leading: it must first collect what the other broker has. That's the promotion step in §19, tested by `A_confirmed_record_survives_a_lagging_broker_becoming_leader`.
+
+---
+
+## 19. A new leader takes over
+
+**When it happens.** The leader dies or gets partitioned away, its Lease expires, and another broker wins it. That broker may be behind, and it may hold records the old leader never got confirmed (§18).
+
+```mermaid
+sequenceDiagram
+    participant D as broker-2 · coordination (D)
+    participant P as broker-2 · LeaderPromotion
+    participant B1 as broker-1
+    participant B0 as broker-0 (old leader, gone)
+    D->>P: PromoteAsync(epoch 2), IsLeader still false
+    P->>B1: ListTopics(epoch 2)
+    Note over B1: Adopts epoch 2 first, then answers [orders]
+    B0--xB1: Append(epoch 1) arrives late: STALE_EPOCH
+    P->>B1: orders: empty Append(epoch 2), then its last record
+    B1-->>P: ends at 42/e1
+    Note over P: Mine ends at 41/e1: broker-1 is more complete
+    P->>B1: Fetch orders from my confirmed record, up to 42
+    B1-->>P: 41/e1, 42/e1
+    Note over P: Appended to myself, as my own follower
+    Note over P: Writes 43/e2 (EpochChange)
+    P-->>D: ready
+    D->>D: IsLeader = true, CurrentEpoch = 2, EpochChanged
+    rect rgba(134, 142, 150, 0.15)
+    Note over D,B1: QuorumReplicator starts orders: replicates 43/e2 to broker-1.<br/>Once it has it, 43 is confirmed, and 42 with it.
+    end
+```
+
+**Guardrails.**
+
+| Step | Guardrail | Prevents |
+| --- | --- | --- |
+| Before anything | Refuse if `IsLeader` is already true, or if the epoch is older than one already seen | Old-epoch records landing after the new epoch's mark; promoting at a stale epoch |
+| Topics | `ListTopics` from a majority. Topics are recorded before the epoch check, so a topic created at that moment is listed or refused | Forgetting a topic the new leader never received |
+| Survey | The new epoch is announced with an `Append` that takes the topic's lock. A majority must answer, and each call has a deadline and retries | The old leader confirming anything afterwards; missing an append it has in flight; one frozen broker blocking the takeover |
+| Choice | The most complete log wins (`LogTip`: newer last epoch, then longer). On a tie, keep this broker's own | Losing a record a majority has |
+| Catch-up | Copy from this broker's confirmed record up to where the survey saw the source end, through this broker's own `Append` handling | Overwriting a confirmed record; copying from a newer leader's log; following a source that changed (it surveys again) |
+| Mark | One `EpochChange` per epoch and topic, none for topics with no records | Old-epoch records staying unconfirmed (Raft's no-op entry); stray folders |
+| After | A broker that leads epoch N refuses another leader of epoch N, but accepts N+1 | Two leaders of one epoch writing into a leader's log, without blocking a replaced leader from following |
+
+**Where.** [LeaderPromotion.cs](../src/K0sStreams.Replication/LeaderPromotion.cs), [PeerSurvey.cs](../src/K0sStreams.Replication/PeerSurvey.cs), [LogCatchUp.cs](../src/K0sStreams.Replication/LogCatchUp.cs), [EpochChangeWriter.cs](../src/K0sStreams.Replication/EpochChangeWriter.cs), and the guard in `AppendHandler.Fence`.
+
+**Proven by** `LeaderPromotionTests` (14 scenarios on three complete brokers), plus `PeerSurveyTests`, `LogCatchUpTests` and `MajorityCallTests` for each step on its own.
