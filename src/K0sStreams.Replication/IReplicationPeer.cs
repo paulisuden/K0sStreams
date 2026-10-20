@@ -17,4 +17,7 @@ internal interface IReplicationPeer
 
     /// <summary>Epoch, end offset, high watermark and role of the broker for one topic.</summary>
     Task<StateResponse> GetStateAsync(StateRequest request, CancellationToken ct = default);
+
+    /// <summary>The topics the broker holds a log for, after adopting the request's epoch if it's newer.</summary>
+    Task<ListTopicsResponse> ListTopicsAsync(ListTopicsRequest request, CancellationToken ct = default);
 }

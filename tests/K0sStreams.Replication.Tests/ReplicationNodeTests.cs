@@ -89,6 +89,21 @@ public sealed class ReplicationNodeTests : IDisposable
     }
 
     [Fact]
+    public async Task ListTopics_returns_the_known_topics_after_adopting_a_newer_epoch()
+    {
+        var payments = Append(1, -1, 0, -1, Message(0, 1));
+        payments.Topic = "payments";
+        await _broker.Node.AppendAsync(Append(1, -1, 0, -1, Message(0, 1)));
+        await _broker.Node.AppendAsync(payments);
+
+        var response = await _broker.Node.ListTopicsAsync(new ListTopicsRequest { Epoch = 3 });
+
+        response.Topics.Should().Equal("orders", "payments");
+        response.Epoch.Should().Be(3);
+        (await _broker.Node.AppendAsync(Append(2, 0, 1, -1))).Code.Should().Be(AppendError.StaleEpoch);
+    }
+
+    [Fact]
     public async Task GetState_reports_epoch_offsets_and_role()
     {
         await SeedAsync(_broker.Log, 1, 1, 1);

@@ -33,6 +33,14 @@ public class RegistrationTests
         services.GetRequiredService<IReplicator>().Should().BeOfType<QuorumReplicator>();
     }
 
+    [Fact]
+    public void The_leader_promotion_is_registered()
+    {
+        using var services = BuildServices([]);
+
+        services.GetRequiredService<ILeaderPromotion>().Should().BeOfType<LeaderPromotion>();
+    }
+
     [Theory]
     [InlineData("Replication:MaxBatchRecords", "0")]
     [InlineData("Replication:MaxBatchBytes", "999999999")]

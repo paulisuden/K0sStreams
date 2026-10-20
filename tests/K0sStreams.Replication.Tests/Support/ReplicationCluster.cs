@@ -34,6 +34,7 @@ internal sealed class ReplicationCluster : IAsyncDisposable
             Leader.Log,
             Leader.Cluster,
             Leader.Epochs,
+            Leader.KnownTopics,
             peers,
             Microsoft.Extensions.Options.Options.Create(Options),
             Time,

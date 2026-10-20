@@ -11,7 +11,8 @@ namespace K0sStreams.Replication;
 /// record before the batch, truncation of a divergent tail, append, and the follower's high watermark.
 /// Appends to the same topic run one at a time. Every topic is a single log (see <see cref="SingleLog"/>).
 /// </summary>
-internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogger<AppendHandler> logger) : IDisposable
+internal sealed partial class AppendHandler(
+    ILog log, EpochTracker epochs, IClusterState cluster, KnownTopics knownTopics, ILogger<AppendHandler> logger) : IDisposable
 {
     /// <summary>Value of <c>prev_offset</c> when the batch starts at offset 0.</summary>
     private const long NoPrevious = -1;
@@ -25,6 +26,10 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
         {
             return Reject(AppendError.UnknownTopic, epochs.Current, NoPrevious, $"Invalid topic '{request.Topic}', or partition {request.Partition}: every topic is a single log, partition {SingleLog.Partition}.");
         }
+
+        // Before the epoch check, never after: a new leader's ListTopics then either lists this topic, or had already
+        // raised this broker's epoch so the check below refuses an old leader's first record of it.
+        knownTopics.Add(request.Topic);
 
         var gate = _gates.GetOrAdd(request.Topic, static _ => new SemaphoreSlim(1, 1));
 
@@ -53,15 +58,13 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
     private async Task<AppendResponse> AppendAsync(AppendRequest request, CancellationToken ct)
     {
         string topic = request.Topic;
-
-        long localEpoch = epochs.Current;
-        if (request.Epoch < localEpoch)
+        if (Fence(request) is { } rejection)
         {
-            return Reject(AppendError.StaleEpoch, localEpoch, log.EndOffset(topic), $"Epoch {request.Epoch} is older than the local epoch {localEpoch}.");
+            return rejection;
         }
 
         // A newer epoch is adopted even if the checks below fail: from here on the previous leader is fenced.
-        localEpoch = epochs.Observe(request.Epoch);
+        long localEpoch = epochs.Observe(request.Epoch);
 
         if (!await HasRecordAsync(topic, request.PrevOffset, request.PrevEpoch, ct).ConfigureAwait(false))
         {
@@ -89,6 +92,28 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
         }
 
         return new AppendResponse { Ok = true, Epoch = localEpoch, EndOffset = log.EndOffset(topic) };
+    }
+
+    /// <summary>
+    /// Refuses a request from a replaced leader (an older epoch), or from a second leader of the epoch this broker leads.
+    /// A newer epoch gets through even while this broker still thinks it leads: it was replaced, and coordination hasn't
+    /// told it yet.
+    /// </summary>
+    private AppendResponse? Fence(AppendRequest request)
+    {
+        long localEpoch = epochs.Current;
+        if (request.Epoch < localEpoch)
+        {
+            return Reject(AppendError.StaleEpoch, localEpoch, log.EndOffset(request.Topic), $"Epoch {request.Epoch} is older than the local epoch {localEpoch}.");
+        }
+
+        if (cluster.IsLeader && request.Epoch == cluster.CurrentEpoch)
+        {
+            LogSecondLeader(logger, request.LeaderId, request.Topic, request.Epoch);
+            return Reject(AppendError.StaleEpoch, localEpoch, log.EndOffset(request.Topic), $"This broker leads epoch {request.Epoch}; {request.LeaderId} can't lead it too.");
+        }
+
+        return null;
     }
 
     private async ValueTask<bool> HasRecordAsync(string topic, long offset, long epoch, CancellationToken ct)
@@ -203,6 +228,9 @@ internal sealed partial class AppendHandler(ILog log, EpochTracker epochs, ILogg
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Truncating the divergent tail of {Topic}: keeping up to offset {ToOffset}, the local end offset was {EndOffset}.")]
     private static partial void LogTruncating(ILogger logger, string topic, long toOffset, long endOffset);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "{LeaderId} sent records of {Topic} at epoch {Epoch}, which this broker leads: two leaders of one epoch. Refused.")]
+    private static partial void LogSecondLeader(ILogger logger, string leaderId, string topic, long epoch);
 
     [LoggerMessage(Level = LogLevel.Critical, Message = "The leader's log conflicts with confirmed data in {Topic} at offset {Offset}. Refusing to truncate.")]
     private static partial void LogConflictWithConfirmedData(ILogger logger, Exception exception, string topic, long offset);

@@ -24,6 +24,7 @@ public static class ServiceCollectionExtensions
 
         services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<EpochTracker>();
+        services.AddSingleton<KnownTopics>();
         services.AddSingleton<AppendHandler>();
         services.AddSingleton<ReplicationNode>();
         services.AddSingleton<PeerDirectory>();
@@ -38,10 +39,23 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<ILog>(),
             sp.GetRequiredService<IClusterState>(),
             sp.GetRequiredService<EpochTracker>(),
+            sp.GetRequiredService<KnownTopics>(),
             sp.GetRequiredService<PeerDirectory>().Peers,
             sp.GetRequiredService<IOptions<ReplicationOptions>>(),
             sp.GetRequiredService<TimeProvider>(),
             sp.GetRequiredService<ILogger<QuorumReplicator>>()));
+
+        // Phase 4: coordination calls ILeaderPromotion when this broker wins the Lease.
+        services.AddSingleton<MajorityCall>();
+        services.AddSingleton(sp => new PeerSurvey(
+            sp.GetRequiredService<ReplicationNode>(),
+            sp.GetRequiredService<IClusterState>(),
+            sp.GetRequiredService<PeerDirectory>().Peers,
+            sp.GetRequiredService<MajorityCall>(),
+            sp.GetRequiredService<EpochTracker>()));
+        services.AddSingleton<LogCatchUp>();
+        services.AddSingleton<EpochChangeWriter>();
+        services.AddSingleton<ILeaderPromotion, LeaderPromotion>();
         return services;
     }
 

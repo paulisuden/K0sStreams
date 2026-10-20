@@ -43,6 +43,16 @@ public sealed class GrpcReplicationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ListTopics_works_over_grpc()
+    {
+        await _follower.Client.AppendAsync(Append(1, -1, 0, -1, Message(0, 1)));
+
+        var response = await _follower.Client.ListTopicsAsync(new ListTopicsRequest { Epoch = 1 });
+
+        response.Topics.Should().Equal(Topic);
+    }
+
+    [Fact]
     public async Task A_stale_leader_is_fenced()
     {
         _follower.Cluster.ChangeEpoch(3, leader: false);

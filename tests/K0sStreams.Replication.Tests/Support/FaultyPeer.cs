@@ -59,6 +59,12 @@ internal sealed class FaultyPeer(IReplicationPeer inner) : IReplicationPeer
         return await Inner.GetStateAsync(request, ct);
     }
 
+    public async Task<ListTopicsResponse> ListTopicsAsync(ListTopicsRequest request, CancellationToken ct = default)
+    {
+        await PassAsync(ct);
+        return await Inner.ListTopicsAsync(request, ct);
+    }
+
     private async Task PassAsync(CancellationToken ct)
     {
         if (Volatile.Read(ref _pause) is { } pause)

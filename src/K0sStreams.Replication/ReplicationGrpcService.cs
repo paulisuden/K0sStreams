@@ -20,4 +20,7 @@ internal sealed class ReplicationGrpcService(ReplicationNode node) : GrpcReplica
 
     public override Task<StateResponse> GetState(StateRequest request, ServerCallContext context) =>
         node.GetStateAsync(request, context.CancellationToken);
+
+    public override Task<ListTopicsResponse> ListTopics(ListTopicsRequest request, ServerCallContext context) =>
+        node.ListTopicsAsync(request, context.CancellationToken);
 }

@@ -14,6 +14,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
 {
     private readonly Lock _gate = new();
     private readonly IClusterState _cluster;
+    private readonly KnownTopics _knownTopics;
     private readonly KeyValuePair<string, IReplicationPeer>[] _peers;
     private LeaderTerm? _term;
     private bool _disposed;
@@ -22,6 +23,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         ILog log,
         IClusterState cluster,
         EpochTracker epochs,
+        KnownTopics knownTopics,
         IReadOnlyDictionary<string, IReplicationPeer> peers,
         IOptions<ReplicationOptions> options,
         TimeProvider time,
@@ -31,6 +33,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         Log = log;
         _cluster = cluster;
         Epochs = epochs;
+        _knownTopics = knownTopics;
         _peers = [.. peers.OrderBy(static peer => peer.Key, StringComparer.Ordinal)];
         Options = options.Value;
         Time = time;
@@ -70,6 +73,9 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
             return ValueTask.FromCanceled(ct);
         }
 
+        // Before the leadership check, never after: a new leader's ListTopics then either lists this topic, or had
+        // already raised this broker's epoch so the check refuses (see AppendHandler).
+        _knownTopics.Add(topic);
         var term = CurrentTerm();
         if (term is null)
         {
@@ -238,6 +244,28 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         }
     }
 
+    /// <summary>
+    /// Right after taking over, starts replicating every topic this broker holds. The promotion left an EpochChange
+    /// record at the end of each one; once a majority has it, it's confirmed, and so is every older record before it
+    /// (Raft's no-op entry), without waiting for a client write.
+    /// </summary>
+    private void StartKnownTopics()
+    {
+        var term = _peers.Length == 0 ? null : CurrentTerm();
+        if (term is null)
+        {
+            return;
+        }
+
+        foreach (string topic in _knownTopics.Snapshot())
+        {
+            if (Log.EndOffset(topic) >= 0)
+            {
+                GetOrStartTopic(term, topic, Log.HighWatermark(topic) + 1);
+            }
+        }
+    }
+
     private void OnEpochChanged(long epoch)
     {
         // Raised on coordination's thread: never let an exception escape into it.
@@ -252,6 +280,11 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
             if (term is not null && (epoch != term.Epoch || !_cluster.IsLeader))
             {
                 StepDown(term, $"the epoch changed to {epoch}");
+            }
+
+            if (_cluster.IsLeader && _cluster.CurrentEpoch == epoch)
+            {
+                StartKnownTopics();
             }
         }
         catch (Exception ex)

@@ -44,6 +44,51 @@ public sealed class AppendHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_leader_refuses_a_second_leader_of_its_own_epoch()
+    {
+        using var leader = new TestNode("broker-0", epoch: 1, isLeader: true);
+
+        var response = await leader.Node.AppendAsync(Append(1, -1, 0, -1, Message(0, 1)));
+
+        response.Code.Should().Be(AppendError.StaleEpoch);
+        leader.Log.EndOffset(Topic).Should().Be(-1);
+    }
+
+    [Fact]
+    public async Task A_leader_that_was_replaced_accepts_the_newer_epoch()
+    {
+        // Coordination hasn't told it yet: it still believes it leads epoch 1.
+        using var oldLeader = new TestNode("broker-0", epoch: 1, isLeader: true);
+
+        var response = await oldLeader.Node.AppendAsync(Append(2, -1, 0, -1, Message(0, 2)));
+
+        response.Ok.Should().BeTrue();
+        oldLeader.Epochs.Current.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task A_replaced_leader_follows_the_new_leader_even_after_adopting_its_epoch()
+    {
+        // The new leader's survey already reached it (epoch 2), but coordination still says it leads epoch 1.
+        using var oldLeader = new TestNode("broker-0", epoch: 1, isLeader: true);
+        oldLeader.Epochs.Observe(2);
+
+        var response = await oldLeader.Node.AppendAsync(Append(2, -1, 0, -1, Message(0, 2)));
+
+        response.Ok.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task The_topic_is_recorded_even_when_the_append_is_refused()
+    {
+        _follower.Cluster.ChangeEpoch(3, leader: false);
+
+        (await AppendAsync(Append(2, -1, 0, -1, Message(0, 2)))).Code.Should().Be(AppendError.StaleEpoch);
+
+        _follower.KnownTopics.Snapshot().Should().Equal(Topic);
+    }
+
+    [Fact]
     public async Task Append_with_an_older_epoch_is_rejected_and_reports_the_local_epoch()
     {
         _follower.Cluster.ChangeEpoch(3, leader: false);

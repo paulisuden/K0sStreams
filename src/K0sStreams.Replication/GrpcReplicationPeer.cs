@@ -46,5 +46,11 @@ internal sealed class GrpcReplicationPeer(GrpcReplication.ReplicationClient clie
         return await call.ResponseAsync.ConfigureAwait(false);
     }
 
+    public async Task<ListTopicsResponse> ListTopicsAsync(ListTopicsRequest request, CancellationToken ct = default)
+    {
+        using var call = client.ListTopicsAsync(request, deadline: Deadline(), cancellationToken: ct);
+        return await call.ResponseAsync.ConfigureAwait(false);
+    }
+
     private DateTime Deadline() => time.GetUtcNow().UtcDateTime + rpcTimeout;
 }
