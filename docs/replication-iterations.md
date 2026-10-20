@@ -6,6 +6,27 @@ Newest iteration first. Add a new section at the top for each one.
 
 ---
 
+## Iteration 3.1 · The code grouped by role (refactor)
+
+| | |
+| --- | --- |
+| Date | 20 Oct 2026 |
+| Status | Done on `feature/replicacion`. No behaviour change: the same 128 tests pass. |
+
+The 24 files were in one folder. They're now grouped by role, with one folder and one namespace each:
+
+- `Follower/`: answering other brokers;
+- `Leader/`: replicating to followers;
+- `Failover/`: getting a new leader ready;
+- `Network/`: gRPC and the `IReplicationPeer` seam;
+- `Common/`: small shared pieces.
+
+The tests use the same folders. A new [README](../src/K0sStreams.Replication/README.md) maps the folders, follows a write through them, and suggests where to start reading.
+
+Each file's `using K0sStreams.Replication.…` lines now show which groups it depends on. Nothing depends on `Leader/` or `Failover/` except the registration.
+
+---
+
 ## Iteration 3 · Phase 4: failover (leader promotion)
 
 | | |

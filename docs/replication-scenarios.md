@@ -207,7 +207,7 @@ Two design rules hold the order together:
 - **Nothing is written until every check has passed.** Gates G1 to G5 only read. A rejected request leaves the log exactly as it was.
 - **The cheapest and most important checks come first.** An invalid address never even gets a lock. A request from a replaced leader is turned away before any record is looked at.
 
-All of it lives in [AppendHandler.cs](../src/K0sStreams.Replication/AppendHandler.cs).
+All of it lives in [AppendHandler.cs](../src/K0sStreams.Replication/Follower/AppendHandler.cs).
 
 ---
 
@@ -239,7 +239,7 @@ flowchart LR
 
 **Guardrail.** Every operation validates the address with the same rules as topic creation (`TopicConfig.IsValidName`) before any other step. Because the check runs before taking the topic's lock, junk names don't even create a lock entry in memory.
 
-**Where.** [SingleLog.cs](../src/K0sStreams.Replication/SingleLog.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
+**Where.** [SingleLog.cs](../src/K0sStreams.Replication/Common/SingleLog.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
 
 ---
 
@@ -299,7 +299,7 @@ sequenceDiagram
 
 **Guardrail.** This broker's epoch is the higher of two sources: what coordination says, and the highest epoch accepted from a leader. A newer epoch is adopted *as soon as it's seen*, before the log checks. That way the old leader is fenced even if the first append from the new leader fails (for example on a log mismatch).
 
-**Where.** [EpochTracker.cs](../src/K0sStreams.Replication/EpochTracker.cs). `Observe` is safe under concurrent calls and only ever moves the epoch up.
+**Where.** [EpochTracker.cs](../src/K0sStreams.Replication/Common/EpochTracker.cs). `Observe` is safe under concurrent calls and only ever moves the epoch up.
 
 ---
 
@@ -638,7 +638,7 @@ flowchart TD
 
 **Coverage.** The unreachable case is tested over real gRPC, and the leader's backoff and recovery are tested in `QuorumReplicatorTests` (`A_write_is_confirmed_with_one_follower_down`, `Pending_writes_confirm_when_a_follower_returns`). A call that times out (`DeadlineExceeded`) still has no test of its own.
 
-**Where.** [GrpcReplicationPeer.cs](../src/K0sStreams.Replication/GrpcReplicationPeer.cs).
+**Where.** [GrpcReplicationPeer.cs](../src/K0sStreams.Replication/Network/GrpcReplicationPeer.cs).
 
 ---
 
@@ -665,7 +665,7 @@ flowchart TD
 - **Fail at startup, not later.** A bad value stops the broker immediately with a clear message, instead of breaking replication silently in production.
 - **Never a peer of itself.** All three brokers can share the same peer list; each one skips its own entry. Replicating to yourself would make a single broker count as two copies, a fake quorum.
 
-**Where.** `ReplicationOptions.IsValid`, `AddK0sReplication` (`ValidateOnStart`), [PeerDirectory.cs](../src/K0sStreams.Replication/PeerDirectory.cs).
+**Where.** `ReplicationOptions.IsValid`, `AddK0sReplication` (`ValidateOnStart`), [PeerDirectory.cs](../src/K0sStreams.Replication/Network/PeerDirectory.cs).
 
 ---
 
@@ -752,6 +752,6 @@ sequenceDiagram
 | Mark | One `EpochChange` per epoch and topic, none for topics with no records | Old-epoch records staying unconfirmed (Raft's no-op entry); stray folders |
 | After | A broker that leads epoch N refuses another leader of epoch N, but accepts N+1 | Two leaders of one epoch writing into a leader's log, without blocking a replaced leader from following |
 
-**Where.** [LeaderPromotion.cs](../src/K0sStreams.Replication/LeaderPromotion.cs), [PeerSurvey.cs](../src/K0sStreams.Replication/PeerSurvey.cs), [LogCatchUp.cs](../src/K0sStreams.Replication/LogCatchUp.cs), [EpochChangeWriter.cs](../src/K0sStreams.Replication/EpochChangeWriter.cs), and the guard in `AppendHandler.Fence`.
+**Where.** [LeaderPromotion.cs](../src/K0sStreams.Replication/Failover/LeaderPromotion.cs), [PeerSurvey.cs](../src/K0sStreams.Replication/Failover/PeerSurvey.cs), [LogCatchUp.cs](../src/K0sStreams.Replication/Failover/LogCatchUp.cs), [EpochChangeWriter.cs](../src/K0sStreams.Replication/Failover/EpochChangeWriter.cs), and the guard in `AppendHandler.Fence`.
 
 **Proven by** `LeaderPromotionTests` (14 scenarios on three complete brokers), plus `PeerSurveyTests`, `LogCatchUpTests` and `MajorityCallTests` for each step on its own.

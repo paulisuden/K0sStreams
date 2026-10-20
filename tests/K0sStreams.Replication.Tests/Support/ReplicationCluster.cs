@@ -1,5 +1,8 @@
 using System.Text;
 using K0sStreams.Contracts;
+using K0sStreams.Replication.Common;
+using K0sStreams.Replication.Leader;
+using K0sStreams.Replication.Network;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using static K0sStreams.Replication.Tests.Support.TestRecords;
@@ -9,7 +12,7 @@ namespace K0sStreams.Replication.Tests.Support;
 
 /// <summary>
 /// A leader and its followers in one process, with no network: the leader's <see cref="QuorumReplicator"/> reaches each
-/// follower's <see cref="ReplicationNode"/> through a <see cref="FaultyPeer"/>. Time is a <see cref="FakeTimeProvider"/>.
+/// follower's <see cref="K0sStreams.Replication.Follower.ReplicationNode"/> through a <see cref="FaultyPeer"/>. Time is a <see cref="FakeTimeProvider"/>.
 /// </summary>
 internal sealed class ReplicationCluster : IAsyncDisposable
 {

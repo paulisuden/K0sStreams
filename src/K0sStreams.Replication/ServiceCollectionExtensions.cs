@@ -1,4 +1,9 @@
 using K0sStreams.Contracts;
+using K0sStreams.Replication.Common;
+using K0sStreams.Replication.Failover;
+using K0sStreams.Replication.Follower;
+using K0sStreams.Replication.Leader;
+using K0sStreams.Replication.Network;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;

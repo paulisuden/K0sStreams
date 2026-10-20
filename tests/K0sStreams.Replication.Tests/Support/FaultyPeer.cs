@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Grpc.Core;
 using K0sStreams.Contracts.Grpc;
+using K0sStreams.Replication.Network;
 
 namespace K0sStreams.Replication.Tests.Support;
 

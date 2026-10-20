@@ -4,6 +4,8 @@ How the code in `src/K0sStreams.Replication` is put together: which classes exis
 
 Reflects the code as of [iteration 3](replication-iterations.md) (phase 4): follower side, gRPC layer, leader side and failover. Section 8 shows what's still to come.
 
+The code is grouped by role, one folder and namespace each: `Follower/`, `Leader/`, `Failover/`, `Network/` and `Common/`. The project's [README](../src/K0sStreams.Replication/README.md) maps them, shows how a write flows through them, and suggests where to start reading.
+
 ---
 
 ## 1. The block in one minute
@@ -191,7 +193,7 @@ The tests skip the network by calling the follower's `ReplicationNode` directly.
 
 ### 3.1 `ReplicationGrpcService`
 
-[ReplicationGrpcService.cs](../src/K0sStreams.Replication/ReplicationGrpcService.cs) · runs on every broker · one instance per call (gRPC default)
+[ReplicationGrpcService.cs](../src/K0sStreams.Replication/Network/ReplicationGrpcService.cs) · runs on every broker · one instance per call (gRPC default)
 
 **What it does.** It's the gRPC endpoint. It inherits from the generated `Replication.ReplicationBase` and overrides `Append`, `Fetch` and `GetState`, forwarding each to `ReplicationNode`. For `Fetch`, it writes each batch to the response stream as `ReplicationNode` produces it.
 
@@ -199,7 +201,7 @@ The tests skip the network by calling the follower's `ReplicationNode` directly.
 
 ### 3.2 `ReplicationNode`
 
-[ReplicationNode.cs](../src/K0sStreams.Replication/ReplicationNode.cs) · runs on every broker · singleton
+[ReplicationNode.cs](../src/K0sStreams.Replication/Follower/ReplicationNode.cs) · runs on every broker · singleton
 
 **What it does.** It's this broker's implementation of `IReplicationPeer`, the protocol as plain C#:
 
@@ -213,7 +215,7 @@ Invalid requests (bad topic name, out-of-range partition, negative offset) fail 
 
 ### 3.3 `AppendHandler`
 
-[AppendHandler.cs](../src/K0sStreams.Replication/AppendHandler.cs) · runs on followers · singleton
+[AppendHandler.cs](../src/K0sStreams.Replication/Follower/AppendHandler.cs) · runs on followers · singleton
 
 **What it does.** Decides whether a follower's log changes when a leader sends records, and how. For each request, in this order:
 
@@ -237,7 +239,7 @@ Requests for the same topic run one at a time (a lock per topic). A conflict wit
 
 ### 4.1 `IReplicationPeer`
 
-[IReplicationPeer.cs](../src/K0sStreams.Replication/IReplicationPeer.cs)
+[IReplicationPeer.cs](../src/K0sStreams.Replication/Network/IReplicationPeer.cs)
 
 **What it is.** "A broker you can talk to": `AppendAsync`, `FetchAsync` and `GetStateAsync`. Requests and responses are the classes generated from `replication.proto`; there are no duplicate C# types.
 
@@ -245,7 +247,7 @@ Requests for the same topic run one at a time (a lock per topic). A conflict wit
 
 ### 4.2 `GrpcReplicationPeer`
 
-[GrpcReplicationPeer.cs](../src/K0sStreams.Replication/GrpcReplicationPeer.cs) · used by the leader
+[GrpcReplicationPeer.cs](../src/K0sStreams.Replication/Network/GrpcReplicationPeer.cs) · used by the leader
 
 **What it does.** It implements `IReplicationPeer` on top of the generated `ReplicationClient`:
 
@@ -259,7 +261,7 @@ Failures surface as `RpcException`: `Unavailable` when the broker can't be reach
 
 ### 4.3 `PeerDirectory`
 
-[PeerDirectory.cs](../src/K0sStreams.Replication/PeerDirectory.cs) · singleton
+[PeerDirectory.cs](../src/K0sStreams.Replication/Network/PeerDirectory.cs) · singleton
 
 **What it does.** Reads `Replication:Peers` (node id → gRPC address), skips this broker's own entry, and builds one `GrpcReplicationPeer` per remaining broker. Channels are created once, connect lazily on the first call, and are closed when the broker shuts down.
 
@@ -267,7 +269,7 @@ Failures surface as `RpcException`: `Unavailable` when the broker can't be reach
 
 ### 4.4 `QuorumReplicator`
 
-[QuorumReplicator.cs](../src/K0sStreams.Replication/QuorumReplicator.cs) · runs on the leader · singleton, registered as `IReplicator`
+[QuorumReplicator.cs](../src/K0sStreams.Replication/Leader/QuorumReplicator.cs) · runs on the leader · singleton, registered as `IReplicator`
 
 **What it does.** It's the `IReplicator` B calls after each append. `WaitForQuorumAsync` checks that this broker leads, finds or starts the topic's replication, and completes once the high watermark covers the offset.
 - **Leadership comes in terms.** A `LeaderTerm` lasts while `IClusterState` says this broker leads at one epoch and no broker has shown a newer one.
@@ -278,7 +280,7 @@ Failures surface as `RpcException`: `Unavailable` when the broker can't be reach
 
 ### 4.5 `PeerReplicator`
 
-[PeerReplicator.cs](../src/K0sStreams.Replication/PeerReplicator.cs) · runs on the leader · one per follower and topic
+[PeerReplicator.cs](../src/K0sStreams.Replication/Leader/PeerReplicator.cs) · runs on the leader · one per follower and topic
 
 **What it does.** A background loop that keeps one follower up to date for one topic:
 - **Sending.** It reads the records the follower is missing from the leader's log and sends them with `Append`, one request at a time.
@@ -289,7 +291,7 @@ Failures surface as `RpcException`: `Unavailable` when the broker can't be reach
 
 ### 4.6 `TopicReplication`
 
-[TopicReplication.cs](../src/K0sStreams.Replication/TopicReplication.cs) · runs on the leader · one per topic and term
+[TopicReplication.cs](../src/K0sStreams.Replication/Leader/TopicReplication.cs) · runs on the leader · one per topic and term
 
 **What it does.** For one topic it holds how far each follower is verified to match the leader, the high watermark, and the writes waiting to be confirmed, all under one lock. When enough followers have a record **from the current epoch**, it advances the HW in `ILog` and completes the waits it covers.
 
@@ -297,7 +299,7 @@ Failures surface as `RpcException`: `Unavailable` when the broker can't be reach
 
 ### 4.7 `LeaderTerm` and `AsyncSignal`
 
-[LeaderTerm.cs](../src/K0sStreams.Replication/LeaderTerm.cs) and [AsyncSignal.cs](../src/K0sStreams.Replication/AsyncSignal.cs)
+[LeaderTerm.cs](../src/K0sStreams.Replication/Leader/LeaderTerm.cs) and [AsyncSignal.cs](../src/K0sStreams.Replication/Leader/AsyncSignal.cs)
 
 **What they do.**
 - **`LeaderTerm`** is one period of leadership: its epoch, its topics, its loops, and the cancellation that stops them together.
@@ -307,7 +309,7 @@ Failures surface as `RpcException`: `Unavailable` when the broker can't be reach
 
 ### 4.8 `LeaderPromotion`
 
-[LeaderPromotion.cs](../src/K0sStreams.Replication/LeaderPromotion.cs) · runs on a broker that just won the Lease · singleton, registered as `ILeaderPromotion`
+[LeaderPromotion.cs](../src/K0sStreams.Replication/Failover/LeaderPromotion.cs) · runs on a broker that just won the Lease · singleton, registered as `ILeaderPromotion`
 
 **What it does.** Coordination (D) calls `PromoteAsync(newEpoch)` after winning the Lease and before announcing the new leader ([DEC-002](decisions.md)). It adopts the epoch and gathers every topic from a majority. Then, for each topic, it runs three steps, each in its own class:
 
@@ -328,7 +330,7 @@ Afterwards D announces the leader, `QuorumReplicator` starts every known topic, 
 
 ### 4.9 `PeerSurvey` and `MajorityCall`
 
-[PeerSurvey.cs](../src/K0sStreams.Replication/PeerSurvey.cs) and [MajorityCall.cs](../src/K0sStreams.Replication/MajorityCall.cs)
+[PeerSurvey.cs](../src/K0sStreams.Replication/Failover/PeerSurvey.cs) and [MajorityCall.cs](../src/K0sStreams.Replication/Failover/MajorityCall.cs)
 
 **What they do.** `PeerSurvey` has three operations:
 - **`ListTopicsAsync`:** this broker's topics plus those of a majority.
@@ -346,7 +348,7 @@ This broker answers through its own `ReplicationNode`, exactly like the others.
 
 ### 4.10 `LogCatchUp` and `EpochChangeWriter`
 
-[LogCatchUp.cs](../src/K0sStreams.Replication/LogCatchUp.cs) and [EpochChangeWriter.cs](../src/K0sStreams.Replication/EpochChangeWriter.cs)
+[LogCatchUp.cs](../src/K0sStreams.Replication/Failover/LogCatchUp.cs) and [EpochChangeWriter.cs](../src/K0sStreams.Replication/Failover/EpochChangeWriter.cs)
 
 **What they do.**
 - **`LogCatchUp`** copies from the most complete log. It starts at this broker's confirmed record, whose epoch gets checked, and stops where the survey saw that log end.
@@ -363,7 +365,7 @@ A disagreement on a confirmed record is a protocol bug, and it fails loudly.
 
 ### 4.11 `KnownTopics`
 
-[KnownTopics.cs](../src/K0sStreams.Replication/KnownTopics.cs) · singleton
+[KnownTopics.cs](../src/K0sStreams.Replication/Common/KnownTopics.cs) · singleton
 
 **What it does.** Keeps the topics this broker holds a log for, as replication has seen them. `AppendHandler` adds a topic before its epoch check, and `QuorumReplicator` before its leadership check. `ListTopics` answers with this set.
 
@@ -375,7 +377,7 @@ A disagreement on a confirmed record is a protocol bug, and it fails loudly.
 
 ### 5.1 `EpochTracker`
 
-[EpochTracker.cs](../src/K0sStreams.Replication/EpochTracker.cs) · singleton
+[EpochTracker.cs](../src/K0sStreams.Replication/Common/EpochTracker.cs) · singleton
 
 **What it does.** Holds this broker's epoch for fencing: the higher of the epoch reported by `IClusterState` (D) and the highest epoch accepted from a leader. `Observe` raises it, safely under concurrent calls; it never goes down.
 
@@ -391,7 +393,7 @@ A disagreement on a confirmed record is a protocol bug, and it fails loudly.
 
 ### 5.3 `SingleLog`
 
-[SingleLog.cs](../src/K0sStreams.Replication/SingleLog.cs)
+[SingleLog.cs](../src/K0sStreams.Replication/Common/SingleLog.cs)
 
 **What it does.** Every topic is a single log ([DEC-001](decisions.md)), but `ILog` and `replication.proto` still have a partition until the contracts change. This class pins it to 0 in one place:
 
@@ -489,12 +491,14 @@ Everything is in `tests/K0sStreams.Replication.Tests/`, and the internal classes
 
 ## 10. Where to start reading
 
-1. [IReplicationPeer.cs](../src/K0sStreams.Replication/IReplicationPeer.cs): the three operations, in a dozen lines.
-2. [AppendHandler.cs](../src/K0sStreams.Replication/AppendHandler.cs), next to [replication.md §5.3](replication.md#53-what-a-follower-does-with-an-append): the core logic and the reasoning behind it.
-3. [AppendHandlerTests.cs](../tests/K0sStreams.Replication.Tests/AppendHandlerTests.cs): each test name is one rule, so this reads like a spec.
-4. [ReplicationNode.cs](../src/K0sStreams.Replication/ReplicationNode.cs), then [ReplicationGrpcService.cs](../src/K0sStreams.Replication/ReplicationGrpcService.cs) and [GrpcReplicationPeer.cs](../src/K0sStreams.Replication/GrpcReplicationPeer.cs): how the core is exposed and reached over the network.
-5. [QuorumReplicator.cs](../src/K0sStreams.Replication/QuorumReplicator.cs), [TopicReplication.cs](../src/K0sStreams.Replication/TopicReplication.cs) and [PeerReplicator.cs](../src/K0sStreams.Replication/PeerReplicator.cs), next to [QuorumReplicatorTests.cs](../tests/K0sStreams.Replication.Tests/QuorumReplicatorTests.cs): the leader side.
-6. [LeaderPromotion.cs](../src/K0sStreams.Replication/LeaderPromotion.cs), then [PeerSurvey.cs](../src/K0sStreams.Replication/PeerSurvey.cs), [LogCatchUp.cs](../src/K0sStreams.Replication/LogCatchUp.cs) and [EpochChangeWriter.cs](../src/K0sStreams.Replication/EpochChangeWriter.cs), next to [LeaderPromotionTests.cs](../tests/K0sStreams.Replication.Tests/LeaderPromotionTests.cs): the failover.
+The [README](../src/K0sStreams.Replication/README.md) has the short version, by folder.
+
+1. [IReplicationPeer.cs](../src/K0sStreams.Replication/Network/IReplicationPeer.cs): the three operations, in a dozen lines.
+2. [AppendHandler.cs](../src/K0sStreams.Replication/Follower/AppendHandler.cs), next to [replication.md §5.3](replication.md#53-what-a-follower-does-with-an-append): the core logic and the reasoning behind it.
+3. [AppendHandlerTests.cs](../tests/K0sStreams.Replication.Tests/Follower/AppendHandlerTests.cs): each test name is one rule, so this reads like a spec.
+4. [ReplicationNode.cs](../src/K0sStreams.Replication/Follower/ReplicationNode.cs), then [ReplicationGrpcService.cs](../src/K0sStreams.Replication/Network/ReplicationGrpcService.cs) and [GrpcReplicationPeer.cs](../src/K0sStreams.Replication/Network/GrpcReplicationPeer.cs): how the core is exposed and reached over the network.
+5. [QuorumReplicator.cs](../src/K0sStreams.Replication/Leader/QuorumReplicator.cs), [TopicReplication.cs](../src/K0sStreams.Replication/Leader/TopicReplication.cs) and [PeerReplicator.cs](../src/K0sStreams.Replication/Leader/PeerReplicator.cs), next to [QuorumReplicatorTests.cs](../tests/K0sStreams.Replication.Tests/Leader/QuorumReplicatorTests.cs): the leader side.
+6. [LeaderPromotion.cs](../src/K0sStreams.Replication/Failover/LeaderPromotion.cs), then [PeerSurvey.cs](../src/K0sStreams.Replication/Failover/PeerSurvey.cs), [LogCatchUp.cs](../src/K0sStreams.Replication/Failover/LogCatchUp.cs) and [EpochChangeWriter.cs](../src/K0sStreams.Replication/Failover/EpochChangeWriter.cs), next to [LeaderPromotionTests.cs](../tests/K0sStreams.Replication.Tests/Failover/LeaderPromotionTests.cs): the failover.
 7. [ServiceCollectionExtensions.cs](../src/K0sStreams.Replication/ServiceCollectionExtensions.cs): how it all gets wired into the broker.
 
 A few conventions you'll see throughout: everything is `internal` except the options and the registration methods; every `await` in library code uses `ConfigureAwait(false)`; logging uses source-generated `[LoggerMessage]` methods; time goes through `TimeProvider`, never `DateTime.UtcNow`.

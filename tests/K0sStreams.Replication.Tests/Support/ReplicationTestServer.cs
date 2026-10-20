@@ -2,6 +2,7 @@ using System.Net;
 using Grpc.Net.Client;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Fakes;
+using K0sStreams.Replication.Network;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;

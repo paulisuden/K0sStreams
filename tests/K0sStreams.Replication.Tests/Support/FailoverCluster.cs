@@ -1,5 +1,9 @@
 using System.Text;
 using K0sStreams.Contracts;
+using K0sStreams.Replication.Common;
+using K0sStreams.Replication.Failover;
+using K0sStreams.Replication.Leader;
+using K0sStreams.Replication.Network;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using static K0sStreams.Replication.Tests.Support.TestRecords;

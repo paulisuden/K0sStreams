@@ -1,5 +1,8 @@
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Fakes;
+using K0sStreams.Replication.Failover;
+using K0sStreams.Replication.Leader;
+using K0sStreams.Replication.Network;
 using K0sStreams.Replication.Tests.Support;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;

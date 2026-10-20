@@ -1,5 +1,7 @@
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Fakes;
+using K0sStreams.Replication.Common;
+using K0sStreams.Replication.Follower;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
