@@ -1,3 +1,4 @@
+using K0sStreams.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -8,7 +9,7 @@ public static class ServiceCollectionExtensions
     /// <summary>Registra el motor de cola (<c>IQueueEngine</c>). Dueño: B — Cola y API.</summary>
     public static IServiceCollection AddK0sQueue(this IServiceCollection services, IConfiguration configuration)
     {
-        // Registrar acá la implementación de IQueueEngine.
+        services.AddSingleton<IQueueEngine, QueueEngine>();
         return services;
     }
 }
