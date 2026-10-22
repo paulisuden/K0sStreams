@@ -106,3 +106,78 @@ Worth mentioning in the defense as the way the design would scale.
 1. Agree on this with the team and merge one PR to `Contracts` with all the contract changes above.
 2. Each block adapts in its own branch. For replication it's a small change, done right after the Contracts PR.
 3. Update the docs listed above.
+
+---
+
+## DEC-002 · Promote a new leader instead of truncating to the high watermark
+
+| | |
+| --- | --- |
+| Date | 14 Oct 2026 |
+| Proposed by | C, Replication |
+| Status | Implemented on `feature/replicacion` (replication iteration 3). Needs the team's approval before merging: it changes `Contracts` and the failover plan in ARQUITECTURA.md. |
+
+### Context
+
+ARQUITECTURA.md says that on a failover the new leader "trunca lo que no estaba confirmado por quórum" (Flow 4, step 4), and the phase-4 row gives A "truncar al cambiar de época". contexto.md says `EpochChanged` tells A to truncate. That loses confirmed messages, in two ways ([replication.md §10.1](replication.md#101--failover-as-currently-described-can-lose-confirmed-messages-c-d-a)):
+
+1. **A broker's HW lags.** A follower learns the high watermark one round after the leader. Truncating to its own HW deletes records a producer already got a `201` for.
+2. **The Lease can go to a broker that is behind.** It would then overwrite confirmed records on the others.
+
+### Decision
+
+**No broker truncates on an epoch change.** Before announcing itself, a new leader runs a promotion step, exposed to D as `ILeaderPromotion`. For every topic:
+
+1. **Survey.** Announce the new epoch to a majority, which then refuses the old leader, and learn where each log ends.
+2. **Catch up.** Copy what the most complete of those logs has and this one lacks.
+3. **Mark.** Write an `EpochChange` record. Once it's replicated to a majority, it confirms everything before it.
+
+Only followers truncate, and only when the leader's `Append` shows them a divergent tail. They never truncate a confirmed record.
+
+```mermaid
+sequenceDiagram
+    participant D as D · Coordination
+    participant C as C · new leader's replication
+    participant P as Other brokers
+    participant B as B · API
+    D->>D: wins the Lease, epoch N (IsLeader still false)
+    D->>C: PromoteAsync(N)
+    C->>P: announce N, where does your log end? (a majority)
+    P-->>C: tips (they refuse the old leader from now on)
+    C->>P: copy the missing records from the most complete log
+    C->>C: EpochChange record in every topic
+    C-->>D: ready
+    D->>D: IsLeader = true, CurrentEpoch = N, raise EpochChanged
+    C->>P: replicate the EpochChange records (confirms everything before them)
+    B->>C: new writes at epoch N
+```
+
+### What changes
+
+| Where | Change |
+| --- | --- |
+| `Contracts` (own PR) | New `ILeaderPromotion` (`PromoteAsync(newEpoch)`), with D's obligations in its XML doc. New `ListTopics` RPC in `replication.proto`. Both additive. |
+| **A**, Storage | Don't truncate on `EpochChanged`; only on replication's request. Next Contracts batch: a way to list the topics in `ILog`, so a broker knows its topics after a restart. |
+| **B**, Queue and API | Skip `RecordType.EpochChange` records in history reads and queues: they aren't messages. Only write while `IsLeader`, stamping `CurrentEpoch` at append time. Around a failover, `WaitForQuorumAsync` throws `NotLeaderException` (307 or 503). |
+| **C**, Replication | ✅ Done (iteration 3). |
+| **D**, Coordination | On winning the Lease:<ul><li>call `PromoteAsync(newEpoch)` while `IsLeader` is still false;</li><li>then set `IsLeader = true` and `CurrentEpoch`, and raise `EpochChanged`;</li><li>cancel the token if the Lease is lost meanwhile.</li></ul>Also:<ul><li>give each epoch to one broker only, and report the Lease's epoch on every broker, including after a restart;</li><li>keep renewDeadline < leaseDuration, so an old leader drops `IsLeader` before the Lease can move;</li><li>resolve `ILeaderPromotion` lazily (e.g. from the elector), not in `IClusterState`'s constructor.</li></ul> |
+| Docs | ARQUITECTURA.md (Flow 4 and the phase-4 rows) and contexto.md (`EpochChanged`): their owners update them after approval. |
+
+### Consequences
+
+**Gains**
+
+- No confirmed record is lost on failover; the scenario of a lagging broker becoming leader is a passing test.
+- The old leader is fenced at the survey, before the new leader writes anything, and can't confirm anything afterwards.
+
+**Costs**
+
+- A promotion needs a majority to answer and waits otherwise. No leader is better than one that may lose data.
+- Each failover costs one round of calls per topic, done topic by topic.
+- `KnownTopics` lives in memory. If two brokers restart before a topic gets a new write, a new leader may not know that topic. The fix is the `ILog` topic listing above.
+
+### Alternatives considered
+
+- **Truncate to the HW on an epoch change** (the current plan). It loses confirmed records (see Context).
+- **New proto fields `StateRequest.epoch` and `StateResponse.last_epoch`** (the first proposal in replication.md §10.1). `GetState` doesn't take the topic's lock, so it can race with an append the old leader still has in flight. An empty `Append` at the new epoch takes that lock, and needs no field. The last record's epoch comes from `Fetch(end_offset, 1)`.
+- **Only "in-sync" brokers may take the Lease** (Kafka's ISR). It needs the in-sync set stored somewhere consistent, which is more work for D, and the new leader still has to catch up.

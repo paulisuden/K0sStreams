@@ -2,13 +2,13 @@
 
 How replication behaves when everything works (part 1), what can go wrong, and what the code does about each case (part 2). Every scenario has a diagram, the guardrail that handles it, where that guardrail lives in the code, and the test that proves it.
 
-Reflects the code as of [iteration 1](replication-iterations.md) (phase 2): the follower side and the gRPC layer. What the *leader* does with each answer arrives in phase 3; where it matters it's drawn in grey and marked "Phase 3". For the reasoning behind the protocol see [replication.md](replication.md); for the classes, see the [code guide](replication-code-guide.md).
+Reflects the code as of [iteration 3](replication-iterations.md) (phase 4): the follower side, the gRPC layer, the leader side and failover. What's still missing is drawn in grey. For the reasoning behind the protocol see [replication.md](replication.md); for the classes, see the [code guide](replication-code-guide.md).
 
 **How to read the diagrams**
 
 - `42/e2` means "the record at offset 42, written in epoch 2".
 - Colours in flowcharts: green = accepted or written, red = rejected with nothing written, amber = allowed but worth noticing (truncation, an early stop), grey dashed = not built yet.
-- In sequence diagrams, a shaded block is phase-3 behaviour.
+- In sequence diagrams, a shaded block is what the leader does with the answer.
 
 ---
 
@@ -41,6 +41,7 @@ Reflects the code as of [iteration 1](replication-iterations.md) (phase 2): the 
 | [16](#16-the-other-broker-is-down-or-slow) | The other broker is down or slow | Deadlines on calls | `Unavailable` / `DeadlineExceeded` | `An_unreachable_broker_fails_with_unavailable` (slow path not tested yet) |
 | [17](#17-the-configuration-is-wrong) | Wrong configuration | Checked at startup; never a peer of itself | Broker refuses to start | `Out_of_range_settings_are_rejected`, `Peers_come_from_configuration_and_exclude_this_broker` |
 | [18](#18-not-guarded-yet) | What isn't guarded yet | — | — | — |
+| [19](#19-a-new-leader-takes-over) | A new leader takes over | Survey, catch-up, epoch mark | No confirmed record lost | `LeaderPromotionTests` |
 
 ---
 
@@ -50,28 +51,25 @@ What happens when nothing goes wrong. Every gate in the [map](#0-the-map-every-c
 
 ### N1. The whole write path, and which parts exist today
 
-From a producer's request to its `201`. Colours here mean something different from the rest of the doc: green = built (replication, iteration 1); amber = a fake standing in for the real piece; grey dashed = not built yet.
+From a producer's request to its `201`. Colours here mean something different from the rest of the doc: green = built (replication, iterations 1 and 2); amber = a fake standing in for the real piece; grey dashed = not built yet.
 
 ```mermaid
 flowchart TD
     P["Producer: POST /v1/topics/orders/messages"] --> API["B · REST API"]:::notyet
     API --> LA["A · ILog.AppendAsync on the leader<br/>InMemoryLog fake today"]:::fake
     LA --> W["B calls IReplicator.WaitForQuorumAsync"]:::notyet
-    W --> Q{"Which IReplicator?"}
-    Q -- today --> IR["InstantReplicator<br/>confirms at once, one copy only"]:::fake
-    Q -- "phase 3" --> QR["QuorumReplicator<br/>and one loop per follower"]:::notyet
+    W --> QR["QuorumReplicator<br/>and one PeerReplicator per follower"]:::built
     QR --> GP["GrpcReplicationPeer<br/>gRPC Append to port 9091"]:::built
     GP --> FOL["Follower: ReplicationGrpcService → ReplicationNode<br/>→ AppendHandler → its own ILog"]:::built
-    FOL --> ACK["ok from one follower:<br/>2 of 3 copies on disk"]:::notyet
-    IR --> HW["Leader HW advanced,<br/>the producer gets 201"]
-    ACK --> HW
+    FOL --> ACK["ok from one follower:<br/>2 of 3 copies on disk"]:::built
+    ACK --> HW["Leader HW advanced,<br/>the producer gets 201"]:::built
 
     classDef built fill:#d3f9d8,stroke:#2b8a3e,color:#111
     classDef fake fill:#fff3bf,stroke:#e67700,color:#111
     classDef notyet fill:#f1f3f5,stroke:#868e96,color:#111,stroke-dasharray:4 3
 ```
 
-The follower half of the path is finished and tested, and so is the gRPC client the leader will use. What's missing is the leader's loop that decides when to send, and B's API that starts the whole thing. [replication.md §5.1](replication.md#51-the-happy-path) shows the same path as a sequence, with the timing between brokers.
+Replication's whole part of the path is built and tested, leader and follower. What's missing is B's API that starts it, and A's disk log in place of the in-memory fake. [replication.md §5.1](replication.md#51-the-happy-path) shows the same path as a sequence, with the timing between brokers.
 
 ### N2. A normal append, step by step through the code
 
@@ -109,7 +107,7 @@ sequenceDiagram
 ```
 
 - **Each `AppendAsync` returns only once the record is on disk.** That's the `ILog` contract, so when the follower answers `ok`, its copy counts toward the quorum.
-- **The answer's `end_offset` tells the leader how far this follower now is.** In phase 3 the leader uses it to update this follower's progress and to compute the HW.
+- **The leader counts what the request verified, not `end_offset`.** It records this follower's progress as `prev_offset` + records sent (43 here). It uses `end_offset` only as a hint after a mismatch, because a follower can hold records past the batch that nobody has checked.
 
 **Proven by** `Append_after_the_last_record_extends_the_log_and_follows_the_leaders_high_watermark`, plus `Records_fetched_from_one_broker_are_replicated_to_another` for the same thing over real gRPC.
 
@@ -126,7 +124,7 @@ sequenceDiagram
     F-->>L: ok, end_offset 43
     Note over F: HW 41
     rect rgba(134, 142, 150, 0.15)
-    Note over L: Phase 3: leader and this follower both have 43,<br/>2 of 3, so the leader's HW becomes 43<br/>and the producers get their 201
+    Note over L: Leader and this follower both have 43,<br/>2 of 3, so the leader's HW becomes 43<br/>and the producers get their 201
     end
     L->>F: Heartbeat: Append(prev 43/e1, no records, leader_hw 43)
     F-->>L: ok, end_offset 43
@@ -137,10 +135,10 @@ sequenceDiagram
 ```
 
 - **The leader learns that a record is confirmed from the follower's answer.** The follower only learns it from the *next* message the leader sends.
-- **Heartbeats exist for the quiet moments.** After the last batch of a burst there's no next batch to carry the HW, so a periodic empty `Append` (phase 3) delivers it.
+- **Heartbeats exist for the quiet moments.** After the last batch of a burst there's no next batch to carry the HW, so a periodic empty `Append` delivers it. The leader also sends one right after the HW moves.
 - **That one-round lag is harmless for reads** (clients read up to the leader's HW). It's exactly what makes failover delicate (§18).
 
-**Proven by** `Heartbeat_moves_the_high_watermark_up_to_the_leaders` for the follower side. The leader side arrives in phase 3.
+**Proven by** `Heartbeat_moves_the_high_watermark_up_to_the_leaders` (follower side), `Followers_learn_the_high_watermark_after_confirmation` and `A_follower_restarted_while_idle_catches_up_through_heartbeats` (leader side).
 
 ### N4. Reading a broker's state and records
 
@@ -209,7 +207,7 @@ Two design rules hold the order together:
 - **Nothing is written until every check has passed.** Gates G1 to G5 only read. A rejected request leaves the log exactly as it was.
 - **The cheapest and most important checks come first.** An invalid address never even gets a lock. A request from a replaced leader is turned away before any record is looked at.
 
-All of it lives in [AppendHandler.cs](../src/K0sStreams.Replication/AppendHandler.cs).
+All of it lives in [AppendHandler.cs](../src/K0sStreams.Replication/Follower/AppendHandler.cs).
 
 ---
 
@@ -241,7 +239,7 @@ flowchart LR
 
 **Guardrail.** Every operation validates the address with the same rules as topic creation (`TopicConfig.IsValidName`) before any other step. Because the check runs before taking the topic's lock, junk names don't even create a lock entry in memory.
 
-**Where.** [SingleLog.cs](../src/K0sStreams.Replication/SingleLog.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
+**Where.** [SingleLog.cs](../src/K0sStreams.Replication/Common/SingleLog.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
 
 ---
 
@@ -263,7 +261,7 @@ sequenceDiagram
     Note over B2: 1 is older than 2. Nothing is written.
     B2-->>B0: STALE_EPOCH, epoch 2
     rect rgba(134, 142, 150, 0.15)
-    Note over B0: Phase 3: stop replicating and fail pending writes<br/>with NotLeaderException. The producer never gets a 201.
+    Note over B0: Stops replicating and fails pending writes<br/>with NotLeaderException. The producer never gets a 201.
     end
 ```
 
@@ -301,7 +299,7 @@ sequenceDiagram
 
 **Guardrail.** This broker's epoch is the higher of two sources: what coordination says, and the highest epoch accepted from a leader. A newer epoch is adopted *as soon as it's seen*, before the log checks. That way the old leader is fenced even if the first append from the new leader fails (for example on a log mismatch).
 
-**Where.** [EpochTracker.cs](../src/K0sStreams.Replication/EpochTracker.cs). `Observe` is safe under concurrent calls and only ever moves the epoch up.
+**Where.** [EpochTracker.cs](../src/K0sStreams.Replication/Common/EpochTracker.cs). `Observe` is safe under concurrent calls and only ever moves the epoch up.
 
 ---
 
@@ -317,7 +315,7 @@ sequenceDiagram
     Note over F: I have no record 89.<br/>Accepting would leave a hole from 50 to 89.
     F-->>L: LOG_MISMATCH, end_offset 49
     rect rgba(134, 142, 150, 0.15)
-    Note over L: Phase 3: next offset for this follower = 49 + 1 = 50
+    Note over L: Next offset for this follower = 49 + 1 = 50
     L->>F: Append(prev 49/e1, records [50..90])
     F-->>L: ok, end_offset 90
     end
@@ -340,9 +338,9 @@ flowchart TD
     H -- yes --> E{"Was my record 7 written in epoch 2?"}
     E -- "no, mine is 7/e1" --> M2["LOG_MISMATCH<br/>our histories differ at 7"]:::bad
     E -- yes --> NEXT["Histories agree up to 7: check the batch"]:::ok
-    M1 -.-> B["Phase 3: the leader steps back and retries<br/>until it finds a point where both agree"]:::future
+    M1 -.-> B["The leader steps back and retries<br/>until it finds a point where both agree"]:::ok
     M2 -.-> B
-    B -.-> FIX["Then §11 replaces the follower's stale records"]:::future
+    B -.-> FIX["Then §11 replaces the follower's stale records"]:::ok
 
     classDef ok fill:#d3f9d8,stroke:#2b8a3e,color:#111
     classDef bad fill:#ffe3e3,stroke:#c92a2a,color:#111
@@ -450,7 +448,7 @@ sequenceDiagram
     F-->>L: ok, end_offset 1
 ```
 
-**Guardrail.** Gate G6. Before writing, the follower compares the batch with what it already has and skips the matching part. Retries are harmless, which the leader's loop in phase 3 relies on: it can always simply resend.
+**Guardrail.** Gate G6. Before writing, the follower compares the batch with what it already has and skips the matching part. Retries are harmless, which the leader's loop relies on: it can always simply resend.
 
 **Where.** `AppendHandler.SkipExistingAsync`.
 
@@ -589,7 +587,7 @@ sequenceDiagram
 
 ## 15. A broker asks for records (`Fetch`)
 
-**When it happens.** Today only in tests. From phase 3 on, a lagging follower can use it to catch up, and in phase 4 a new leader uses it to collect records it's missing (§18).
+**When it happens.** Today only in tests: the leader catches followers up by pushing `Append`s. In phase 4, a new leader will use it to collect records it's missing (§18).
 
 ```mermaid
 flowchart TD
@@ -628,7 +626,7 @@ flowchart TD
     R -- "answer in time" --> OK["Response"]:::ok
     R -- "connection refused" --> U["RpcException Unavailable"]:::bad
     R -- "no answer in time" --> T["RpcException DeadlineExceeded"]:::bad
-    U -.-> P["Phase 3: mark this follower as lagging,<br/>keep confirming with the other one, retry later"]:::future
+    U -.-> P["The leader backs off (doubling up to MaxRetryBackoff),<br/>keeps confirming with the other follower, and retries"]:::ok
     T -.-> P
 
     classDef ok fill:#d3f9d8,stroke:#2b8a3e,color:#111
@@ -638,9 +636,9 @@ flowchart TD
 
 **Guardrail.** Every short call has a deadline, so a dead or frozen follower can't make the leader wait forever. With 2 of 3 needed, the leader keeps working as long as one follower answers. Time goes through `TimeProvider`, so phase 3 tests can simulate slowness without real waits.
 
-**Coverage.** The unreachable case is tested. The slow case (`DeadlineExceeded`) isn't yet; it needs `FakeTimeProvider`, planned for phase 3.
+**Coverage.** The unreachable case is tested over real gRPC, and the leader's backoff and recovery are tested in `QuorumReplicatorTests` (`A_write_is_confirmed_with_one_follower_down`, `Pending_writes_confirm_when_a_follower_returns`). A call that times out (`DeadlineExceeded`) still has no test of its own.
 
-**Where.** [GrpcReplicationPeer.cs](../src/K0sStreams.Replication/GrpcReplicationPeer.cs).
+**Where.** [GrpcReplicationPeer.cs](../src/K0sStreams.Replication/Network/GrpcReplicationPeer.cs).
 
 ---
 
@@ -667,7 +665,7 @@ flowchart TD
 - **Fail at startup, not later.** A bad value stops the broker immediately with a clear message, instead of breaking replication silently in production.
 - **Never a peer of itself.** All three brokers can share the same peer list; each one skips its own entry. Replicating to yourself would make a single broker count as two copies, a fake quorum.
 
-**Where.** `ReplicationOptions.IsValid`, `AddK0sReplication` (`ValidateOnStart`), [PeerDirectory.cs](../src/K0sStreams.Replication/PeerDirectory.cs).
+**Where.** `ReplicationOptions.IsValid`, `AddK0sReplication` (`ValidateOnStart`), [PeerDirectory.cs](../src/K0sStreams.Replication/Network/PeerDirectory.cs).
 
 ---
 
@@ -677,18 +675,19 @@ These guardrails come in later phases or need a team decision. They're listed so
 
 | Scenario | What happens today | Planned guardrail | When |
 | --- | --- | --- | --- |
-| **The new leader is missing confirmed records** (the Lease went to a lagging broker) | A confirmed message can be lost; see the diagram below | Promotion step before accepting writes ([replication.md §10.1](replication.md#101--failover-as-currently-described-can-lose-confirmed-messages-c-d-a)) | Phase 4; needs team agreement |
-| **Two brokers both think they lead the same epoch** | `StaticClusterState` makes every broker "leader, epoch 1"; a follower would accept appends from both | Fixed leader from configuration (D), then the real Lease | Phase 3 (fixed leader), phase 4 (Lease) |
-| **The old leader reaches the last follower before the new leader does** | A write can still be confirmed under the old epoch for a moment (§2) | The promotion step announces the new epoch to every peer first (`StateRequest.epoch`) | Phase 4 |
-| **The old leader keeps going after `STALE_EPOCH`** | Nothing reacts yet: there is no leader side | Fail pending writes with `NotLeaderException`, stop the loops | Phase 3 |
-| **Both followers are down** | `InstantReplicator` confirms immediately, so writes "succeed" with one copy | `QuorumReplicator` waits; B gives up after a timeout and answers 503 | Phase 3 |
+| **The new leader is missing confirmed records** (the Lease went to a lagging broker) | ✅ Covered: the promotion copies them from the most complete log of a majority (§19) | — | Done (iteration 3); D must call it ([DEC-002](decisions.md)) |
+| **Two brokers both think they lead the same epoch** | Partly covered: a leader refuses another leader of its own epoch (§19). A follower would still accept both | D gives each epoch to one broker (fixed leader now, the Lease later) | Relies on D |
+| **The old leader reaches the last follower before the new leader does** | ✅ Covered: the survey fences a majority under each topic's lock. A write the old leader got confirmed before that is on a broker the survey reaches, so it's kept | — | Done (iteration 3) |
+| **The old leader keeps going after `STALE_EPOCH`** | ✅ Covered: it adopts the newer epoch, fails pending writes with `NotLeaderException` and stops its loops | — | Done (iteration 2) |
+| **Both followers are down** | `QuorumReplicator` waits until the caller cancels; the HW doesn't move | B passes a timeout to `WaitForQuorumAsync` and answers 503 | When B's API lands |
 | **A broker restarts and forgets the epoch it adopted** | It falls back to D's epoch until a leader contacts it again | Persist the epoch, or read it from the last `EpochChange` record in the log | Later |
+| **Two brokers restart, then a failover, before a topic gets a new write** | `KnownTopics` lives in memory, so the new leader may not know that topic | List topics from `ILog` (A, next Contracts batch) | Before phase 5's chaos tests |
 | **A topic the follower has never heard of** | Accepted for any valid name | Replicated topic metadata ([§10.3](replication.md#103--topics-on-followers-a-b-c-open-topic-1-in-contextomd)) | Team decision |
 | **A malicious broker sends an absurd epoch** | Adopted, which fences the real leader | Out of scope: the project assumes no Byzantine faults | — |
 
-### The most important gap, step by step
+### The failover gap, step by step (closed in phase 4)
 
-How the follower-side guardrails above are *not enough* to protect a failover, and why phase 4's promotion step is needed:
+How the follower-side guardrails alone are *not enough* to protect a failover, and why the promotion step (§19) is needed:
 
 ```mermaid
 sequenceDiagram
@@ -709,4 +708,50 @@ sequenceDiagram
     end
 ```
 
-Every guardrail here does its job; the follower simply can't know that `42/e1` was confirmed, because it learns the HW one round late. The fix has to happen before broker-2 starts leading: it must first collect what the other broker has, as described in replication.md §10.1.
+Every guardrail here does its job; the follower simply can't know that `42/e1` was confirmed, because it learns the HW one round late. The fix has to happen before broker-2 starts leading: it must first collect what the other broker has. That's the promotion step in §19, tested by `A_confirmed_record_survives_a_lagging_broker_becoming_leader`.
+
+---
+
+## 19. A new leader takes over
+
+**When it happens.** The leader dies or gets partitioned away, its Lease expires, and another broker wins it. That broker may be behind, and it may hold records the old leader never got confirmed (§18).
+
+```mermaid
+sequenceDiagram
+    participant D as broker-2 · coordination (D)
+    participant P as broker-2 · LeaderPromotion
+    participant B1 as broker-1
+    participant B0 as broker-0 (old leader, gone)
+    D->>P: PromoteAsync(epoch 2), IsLeader still false
+    P->>B1: ListTopics(epoch 2)
+    Note over B1: Adopts epoch 2 first, then answers [orders]
+    B0--xB1: Append(epoch 1) arrives late: STALE_EPOCH
+    P->>B1: orders: empty Append(epoch 2), then its last record
+    B1-->>P: ends at 42/e1
+    Note over P: Mine ends at 41/e1: broker-1 is more complete
+    P->>B1: Fetch orders from my confirmed record, up to 42
+    B1-->>P: 41/e1, 42/e1
+    Note over P: Appended to myself, as my own follower
+    Note over P: Writes 43/e2 (EpochChange)
+    P-->>D: ready
+    D->>D: IsLeader = true, CurrentEpoch = 2, EpochChanged
+    rect rgba(134, 142, 150, 0.15)
+    Note over D,B1: QuorumReplicator starts orders: replicates 43/e2 to broker-1.<br/>Once it has it, 43 is confirmed, and 42 with it.
+    end
+```
+
+**Guardrails.**
+
+| Step | Guardrail | Prevents |
+| --- | --- | --- |
+| Before anything | Refuse if `IsLeader` is already true, or if the epoch is older than one already seen | Old-epoch records landing after the new epoch's mark; promoting at a stale epoch |
+| Topics | `ListTopics` from a majority. Topics are recorded before the epoch check, so a topic created at that moment is listed or refused | Forgetting a topic the new leader never received |
+| Survey | The new epoch is announced with an `Append` that takes the topic's lock. A majority must answer, and each call has a deadline and retries | The old leader confirming anything afterwards; missing an append it has in flight; one frozen broker blocking the takeover |
+| Choice | The most complete log wins (`LogTip`: newer last epoch, then longer). On a tie, keep this broker's own | Losing a record a majority has |
+| Catch-up | Copy from this broker's confirmed record up to where the survey saw the source end, through this broker's own `Append` handling | Overwriting a confirmed record; copying from a newer leader's log; following a source that changed (it surveys again) |
+| Mark | One `EpochChange` per epoch and topic, none for topics with no records | Old-epoch records staying unconfirmed (Raft's no-op entry); stray folders |
+| After | A broker that leads epoch N refuses another leader of epoch N, but accepts N+1 | Two leaders of one epoch writing into a leader's log, without blocking a replaced leader from following |
+
+**Where.** [LeaderPromotion.cs](../src/K0sStreams.Replication/Failover/LeaderPromotion.cs), [PeerSurvey.cs](../src/K0sStreams.Replication/Failover/PeerSurvey.cs), [LogCatchUp.cs](../src/K0sStreams.Replication/Failover/LogCatchUp.cs), [EpochChangeWriter.cs](../src/K0sStreams.Replication/Failover/EpochChangeWriter.cs), and the guard in `AppendHandler.Fence`.
+
+**Proven by** `LeaderPromotionTests` (14 scenarios on three complete brokers), plus `PeerSurveyTests`, `LogCatchUpTests` and `MajorityCallTests` for each step on its own.

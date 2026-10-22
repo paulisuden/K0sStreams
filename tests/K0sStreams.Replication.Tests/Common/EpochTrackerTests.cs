@@ -1,6 +1,7 @@
+using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Tests.Support;
 
-namespace K0sStreams.Replication.Tests;
+namespace K0sStreams.Replication.Tests.Common;
 
 public class EpochTrackerTests
 {

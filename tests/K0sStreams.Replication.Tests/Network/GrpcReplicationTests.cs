@@ -1,11 +1,13 @@
 using Grpc.Core;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Grpc;
+using K0sStreams.Replication.Common;
+using K0sStreams.Replication.Network;
 using K0sStreams.Replication.Tests.Support;
 using static K0sStreams.Replication.Tests.Support.TestRecords;
 using GrpcReplication = K0sStreams.Contracts.Grpc.Replication;
 
-namespace K0sStreams.Replication.Tests;
+namespace K0sStreams.Replication.Tests.Network;
 
 /// <summary>Two brokers talking real gRPC over HTTP/2 on loopback: the phase 2 "replicate a record between two processes" check.</summary>
 public sealed class GrpcReplicationTests : IAsyncLifetime
@@ -40,6 +42,16 @@ public sealed class GrpcReplicationTests : IAsyncLifetime
         (await EncodedAsync(_follower.Log)).Should().Equal(await EncodedAsync(_leader.Log));
         var state = await _follower.Client.GetStateAsync(new StateRequest { Topic = Topic });
         state.Should().Be(new StateResponse { Epoch = 1, EndOffset = 2, HighWatermark = 2, NodeId = "broker-1", IsLeader = false });
+    }
+
+    [Fact]
+    public async Task ListTopics_works_over_grpc()
+    {
+        await _follower.Client.AppendAsync(Append(1, -1, 0, -1, Message(0, 1)));
+
+        var response = await _follower.Client.ListTopicsAsync(new ListTopicsRequest { Epoch = 1 });
+
+        response.Topics.Should().Equal(Topic);
     }
 
     [Fact]

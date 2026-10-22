@@ -1,4 +1,8 @@
 using K0sStreams.Contracts;
+using K0sStreams.Contracts.Fakes;
+using K0sStreams.Replication.Failover;
+using K0sStreams.Replication.Leader;
+using K0sStreams.Replication.Network;
 using K0sStreams.Replication.Tests.Support;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,10 +28,28 @@ public class RegistrationTests
         services.GetRequiredService<PeerDirectory>().Peers.Keys.Should().BeEquivalentTo("broker-0", "broker-2");
     }
 
+    [Fact]
+    public void The_replicator_is_the_quorum_replicator()
+    {
+        using var services = BuildServices([]);
+
+        services.GetRequiredService<IReplicator>().Should().BeOfType<QuorumReplicator>();
+    }
+
+    [Fact]
+    public void The_leader_promotion_is_registered()
+    {
+        using var services = BuildServices([]);
+
+        services.GetRequiredService<ILeaderPromotion>().Should().BeOfType<LeaderPromotion>();
+    }
+
     [Theory]
     [InlineData("Replication:MaxBatchRecords", "0")]
     [InlineData("Replication:MaxBatchBytes", "999999999")]
     [InlineData("Replication:RpcTimeout", "00:00:00")]
+    [InlineData("Replication:HeartbeatInterval", "00:00:00")]
+    [InlineData("Replication:MaxRetryBackoff", "00:00:00.010")]
     [InlineData("Replication:Peers:broker-0", "broker-0.broker")]
     public void Out_of_range_settings_are_rejected(string key, string value)
     {
@@ -43,6 +65,7 @@ public class RegistrationTests
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
         return new ServiceCollection()
             .AddLogging()
+            .AddSingleton<ILog>(new InMemoryLog())
             .AddSingleton<IClusterState>(new ControllableClusterState("broker-1"))
             .AddK0sReplication(configuration)
             .BuildServiceProvider();

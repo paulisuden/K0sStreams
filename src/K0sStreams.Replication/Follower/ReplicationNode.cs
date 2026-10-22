@@ -3,9 +3,11 @@ using Google.Protobuf;
 using Grpc.Core;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Grpc;
+using K0sStreams.Replication.Common;
+using K0sStreams.Replication.Network;
 using Microsoft.Extensions.Options;
 
-namespace K0sStreams.Replication;
+namespace K0sStreams.Replication.Follower;
 
 /// <summary>
 /// This broker's side of the replication protocol. Other brokers reach it through <see cref="ReplicationGrpcService"/>;
@@ -16,6 +18,7 @@ internal sealed class ReplicationNode(
     IClusterState cluster,
     EpochTracker epochs,
     AppendHandler appendHandler,
+    KnownTopics knownTopics,
     IOptions<ReplicationOptions> options) : IReplicationPeer
 {
     private readonly ReplicationOptions _options = options.Value;
@@ -90,6 +93,18 @@ internal sealed class ReplicationNode(
             NodeId = cluster.NodeId,
             IsLeader = cluster.IsLeader,
         });
+    }
+
+    /// <summary>
+    /// The topics this broker holds a log for. A newer epoch in the request is adopted before the list is taken, so a
+    /// topic the old leader is adding here at the same moment is either listed or refused (see <see cref="AppendHandler"/>).
+    /// </summary>
+    public Task<ListTopicsResponse> ListTopicsAsync(ListTopicsRequest request, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var response = new ListTopicsResponse { Epoch = epochs.Observe(request.Epoch) };
+        response.Topics.AddRange(knownTopics.Snapshot());
+        return Task.FromResult(response);
     }
 
     private RecordBatch Seal(RecordBatch batch, string topic)

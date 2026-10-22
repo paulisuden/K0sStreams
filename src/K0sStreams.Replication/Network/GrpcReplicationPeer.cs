@@ -4,7 +4,7 @@ using Grpc.Net.Client;
 using K0sStreams.Contracts.Grpc;
 using GrpcReplication = K0sStreams.Contracts.Grpc.Replication;
 
-namespace K0sStreams.Replication;
+namespace K0sStreams.Replication.Network;
 
 /// <summary>
 /// A remote broker reached over gRPC. Unary calls get a deadline of <paramref name="rpcTimeout"/>; a Fetch stream
@@ -20,6 +20,9 @@ internal sealed class GrpcReplicationPeer(GrpcReplication.ReplicationClient clie
         {
             MaxReceiveMessageSize = ReplicationOptions.MaxMessageSize,
             MaxSendMessageSize = ReplicationOptions.MaxMessageSize,
+
+            // The default (2 minutes) would keep a restarted broker unreachable for far longer than the restart.
+            MaxReconnectBackoff = TimeSpan.FromSeconds(5),
         });
 
     public async Task<AppendResponse> AppendAsync(AppendRequest request, CancellationToken ct = default)
@@ -40,6 +43,12 @@ internal sealed class GrpcReplicationPeer(GrpcReplication.ReplicationClient clie
     public async Task<StateResponse> GetStateAsync(StateRequest request, CancellationToken ct = default)
     {
         using var call = client.GetStateAsync(request, deadline: Deadline(), cancellationToken: ct);
+        return await call.ResponseAsync.ConfigureAwait(false);
+    }
+
+    public async Task<ListTopicsResponse> ListTopicsAsync(ListTopicsRequest request, CancellationToken ct = default)
+    {
+        using var call = client.ListTopicsAsync(request, deadline: Deadline(), cancellationToken: ct);
         return await call.ResponseAsync.ConfigureAwait(false);
     }
 

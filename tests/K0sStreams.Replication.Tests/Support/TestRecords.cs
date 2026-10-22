@@ -2,6 +2,7 @@ using System.Text;
 using Google.Protobuf;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Grpc;
+using K0sStreams.Replication.Common;
 using Record = K0sStreams.Contracts.Record;
 
 namespace K0sStreams.Replication.Tests.Support;
