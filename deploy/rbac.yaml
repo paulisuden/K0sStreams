@@ -1,0 +1,40 @@
+# Permisos del broker sobre el API server de Kubernetes: solo leer, crear y renovar el Lease del líder (fase 4).
+#
+# Comprobar que el permiso alcanza, sin levantar nada:
+#   kubectl auth can-i update leases --as=system:serviceaccount:default:broker
+
+# La identidad con la que el pod habla con el API server. El StatefulSet la usa en serviceAccountName.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: broker
+  labels:
+    app: broker
+---
+# Lo justo para la elección: get (seguir al líder), create (primer arranque) y update (tomar, renovar y liberar).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: broker-leader-election
+  labels:
+    app: broker
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: broker-leader-election
+  labels:
+    app: broker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: broker-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: broker
+    # Kubernetes exige el namespace de la ServiceAccount. Si se despliega en otro, cambiarlo acá y en el can-i de arriba.
+    namespace: default

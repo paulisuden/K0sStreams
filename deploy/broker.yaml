@@ -10,7 +10,9 @@
 # Después de cambiar el código: de nuevo "minikube image build ..." y "kubectl rollout restart statefulset/broker".
 # Con el mismo tag los pods no ven la imagen nueva hasta reiniciarse ("minikube image load" no la reemplaza).
 #
-# Fase 3: líder fijo broker-0. En la fase 4 el Lease reemplaza Coordination__LeaderId.
+# Fase 4: el líder se elige con el Lease "k0sstreams-leader" (permisos en rbac.yaml). Para ver quién lidera y en qué época:
+#   kubectl get lease k0sstreams-leader -o yaml        # holderIdentity y leaseTransitions (la época)
+#   kubectl get lease k0sstreams-leader -w              # en vivo, mientras se mata al líder
 
 # Headless: le da a cada pod un DNS estable (broker-0.broker), que es lo que usan LeaderAddress y Replication:Peers.
 apiVersion: v1
@@ -66,6 +68,8 @@ spec:
       labels:
         app: broker
     spec:
+      # Con esta identidad el broker lee y renueva el Lease (rbac.yaml).
+      serviceAccountName: broker
       securityContext:
         # La imagen corre como $APP_UID (1654) y el PVC se monta como root: sin esto no puede escribir /data.
         fsGroup: 1654
@@ -88,10 +92,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: Coordination__LeaderId
-              value: broker-0
-            - name: Coordination__LeaderAddress
-              value: http://broker-0.broker:9090
+            # Sin Coordination__LeaderId el broker elige líder con el Lease. {0} es el NodeId del líder.
+            - name: Coordination__LeaderAddressFormat
+              value: http://{0}.broker:9090
             - name: Replication__Peers__broker-0
               value: http://broker-0.broker:9091
             - name: Replication__Peers__broker-1
