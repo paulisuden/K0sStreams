@@ -31,9 +31,20 @@ internal static class ApiEndpoints
     private static async ValueTask<object?> LeaderOnlyAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
         IClusterState cluster = context.HttpContext.RequestServices.GetRequiredService<IClusterState>();
-        return cluster.IsLeader
-            ? await next(context).ConfigureAwait(false)
-            : RedirectToLeader(cluster, context.HttpContext.Request);
+        if (!cluster.IsLeader)
+        {
+            return RedirectToLeader(cluster, context.HttpContext.Request);
+        }
+
+        try
+        {
+            return await next(context).ConfigureAwait(false);
+        }
+        catch (NotLeaderException)
+        {
+            // Dejó de ser líder esperando el quórum: lo escrito no quedó confirmado y el cliente lo reintenta en el nuevo.
+            return RedirectToLeader(cluster, context.HttpContext.Request);
+        }
     }
 
     /// <summary>
@@ -71,7 +82,6 @@ internal static class ApiEndpoints
         IReplicator replicator,
         IClusterState cluster,
         TimeProvider time,
-        HttpRequest httpRequest,
         CancellationToken ct)
     {
         if (string.IsNullOrEmpty(request.Value))
@@ -96,15 +106,7 @@ internal static class ApiEndpoints
 
         // Solo el líder escribe. La replicación sube el high watermark cuando hay quórum.
         long offset = await log.AppendAsync(topic, partition, record, ct).ConfigureAwait(false);
-        try
-        {
-            await replicator.WaitForQuorumAsync(topic, partition, offset, ct).ConfigureAwait(false);
-        }
-        catch (NotLeaderException)
-        {
-            // Dejó de ser líder mientras esperaba: el mensaje no quedó confirmado y el cliente lo reintenta en el nuevo.
-            return RedirectToLeader(cluster, httpRequest);
-        }
+        await replicator.WaitForQuorumAsync(topic, partition, offset, ct).ConfigureAwait(false);
 
         return Results.Ok(new PublishResponse(partition, offset));
     }

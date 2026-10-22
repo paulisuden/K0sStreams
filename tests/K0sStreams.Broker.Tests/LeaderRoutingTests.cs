@@ -1,9 +1,12 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
+using K0sStreams.Contracts;
 using K0sStreams.Contracts.Api;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace K0sStreams.Broker.Tests;
 
@@ -87,6 +90,25 @@ public sealed class LeaderRoutingTests : IDisposable
         response.StatusCode.Should().NotBe(HttpStatusCode.TemporaryRedirect);
     }
 
+    [Fact]
+    public async Task Si_deja_de_ser_lider_esperando_el_quorum_redirige_al_nuevo_lider()
+    {
+        var host = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("Broker:DataDir", _dataDir);
+            builder.UseSetting("Coordination:LeaderAddress", "http://broker-2.broker:9090");
+            builder.ConfigureTestServices(services => services.AddSingleton<IReplicator, NotLeaderReplicator>());
+        });
+        _hosts.Add(host);
+        HttpClient leader = host.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        await leader.PostAsJsonAsync("/v1/topics", new CreateTopicRequest("pedidos"));
+
+        var response = await leader.PostAsJsonAsync("/v1/topics/pedidos/messages", new PublishRequest(null, "a"));
+
+        response.StatusCode.Should().Be(HttpStatusCode.TemporaryRedirect);
+        response.Headers.Location.Should().Be(new Uri("http://broker-2.broker:9090/v1/topics/pedidos/messages"));
+    }
+
     private HttpClient Follower(string? leaderAddress)
     {
         var host = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
@@ -102,4 +124,11 @@ public sealed class LeaderRoutingTests : IDisposable
         _hosts.Add(host);
         return host.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
     }
+}
+
+/// <summary>Un líder que perdió el liderazgo mientras esperaba el quórum.</summary>
+internal sealed class NotLeaderReplicator : IReplicator
+{
+    public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default) =>
+        ValueTask.FromException(new NotLeaderException("Otro broker es el líder."));
 }

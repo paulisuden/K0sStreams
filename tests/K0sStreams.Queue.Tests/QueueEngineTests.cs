@@ -24,7 +24,7 @@ public sealed class QueueEngineTests
     public QueueEngineTests()
     {
         _replicator = new InstantReplicator(_log);
-        _engine = new QueueEngine(_log, _catalog, _cluster, _time);
+        _engine = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
     }
 
     /// <summary>
@@ -261,6 +261,31 @@ public sealed class QueueEngineTests
     }
 
     [Fact]
+    public async Task Cada_evento_de_cola_queda_confirmado_por_quorum_antes_de_responder()
+    {
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a");
+
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await _engine.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset);
+
+        // Offsets: 0 el mensaje, 1 el receive, 2 el ack. El high watermark solo llega a 2 si el ack tuvo quórum.
+        _log.HighWatermark("pedidos", 0).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Si_deja_de_ser_lider_esperando_el_quorum_el_receive_falla_con_NotLeaderException()
+    {
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a");
+        var engine = new QueueEngine(_log, _catalog, _cluster, new NotLeaderReplicator(), _time);
+
+        var receive = async () => await engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+
+        await receive.Should().ThrowAsync<NotLeaderException>();
+    }
+
+    [Fact]
     public async Task Apply_reconstruye_el_estado_de_los_mensajes_en_proceso()
     {
         await CreateTopicAsync();
@@ -268,7 +293,7 @@ public sealed class QueueEngineTests
         await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
         (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
 
-        var recovered = new QueueEngine(_log, _catalog, _cluster, _time);
+        var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
             if (QueueEvent.IsQueueEvent(record.Type))
@@ -290,7 +315,7 @@ public sealed class QueueEngineTests
 
         await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
 
-        var recovered = new QueueEngine(_log, _catalog, _cluster, _time);
+        var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
             if (QueueEvent.IsQueueEvent(record.Type))
@@ -316,7 +341,7 @@ public sealed class QueueEngineTests
         var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
         await _engine.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset);
 
-        var recovered = new QueueEngine(_log, _catalog, _cluster, _time);
+        var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
             if (QueueEvent.IsQueueEvent(record.Type))
@@ -335,7 +360,7 @@ public sealed class QueueEngineTests
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
 
-        var recovered = new QueueEngine(_log, _catalog, _cluster, _time);
+        var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
             recovered.Apply("pedidos", record);
@@ -343,4 +368,11 @@ public sealed class QueueEngineTests
 
         (await recovered.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
     }
+}
+
+/// <summary>Un líder que perdió el liderazgo mientras esperaba el quórum.</summary>
+internal sealed class NotLeaderReplicator : IReplicator
+{
+    public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default) =>
+        ValueTask.FromException(new NotLeaderException("Otro broker es el líder."));
 }

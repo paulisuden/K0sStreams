@@ -11,8 +11,9 @@ namespace K0sStreams.Queue;
 /// <param name="log">Log append-only. Única fuente de verdad.</param>
 /// <param name="catalog">Tópicos existentes y su configuración.</param>
 /// <param name="cluster">Rol y época de este broker.</param>
+/// <param name="replicator">Confirma cada evento de cola por quórum, igual que un mensaje.</param>
 /// <param name="time">Reloj, inyectado para poder probar el visibility timeout.</param>
-public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState cluster, TimeProvider time) : IQueueEngine
+public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState cluster, IReplicator replicator, TimeProvider time) : IQueueEngine
 {
     private readonly ConcurrentDictionary<string, QueueState> _queues = new(StringComparer.Ordinal);
 
@@ -196,12 +197,19 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
     }
 
-    private async ValueTask AppendEventAsync(string topic, QueueEvent queueEvent, CancellationToken ct) =>
-        await log.AppendAsync(
+    /// <summary>
+    /// Escribe el evento y espera el quórum antes de responder, igual que un mensaje: si el líder cayera antes, el
+    /// nuevo líder podría no tener, por ejemplo, un ack ya confirmado al cliente, y volvería a entregar el mensaje.
+    /// </summary>
+    private async ValueTask AppendEventAsync(string topic, QueueEvent queueEvent, CancellationToken ct)
+    {
+        long offset = await log.AppendAsync(
             topic,
             queueEvent.Partition,
             queueEvent.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
             ct).ConfigureAwait(false);
+        await replicator.WaitForQuorumAsync(topic, queueEvent.Partition, offset, ct).ConfigureAwait(false);
+    }
 
     private const int BatchSize = 512;
 
