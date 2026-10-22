@@ -80,6 +80,23 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     }
 
     [Fact]
+    public async Task Con_varias_particiones_todo_se_publica_en_la_particion_0()
+    {
+        string topic = NewTopic();
+        await CreateTopicAsync(topic, partitions: 3);
+
+        var partitions = new List<int>();
+        foreach (string key in new[] { "a", "b", "c", "d" })
+        {
+            PublishResponse? published = await (await PublishAsync(topic, "x", key)).Content.ReadFromJsonAsync<PublishResponse>();
+            partitions.Add(published!.Partition);
+        }
+
+        // DEC-001: cada tópico es un solo log, aunque se haya pedido más de una partición.
+        partitions.Should().AllBeEquivalentTo(0);
+    }
+
+    [Fact]
     public async Task Publicar_en_topico_inexistente_devuelve_not_found()
     {
         (await PublishAsync(NewTopic(), "a")).StatusCode.Should().Be(HttpStatusCode.NotFound);
