@@ -1,10 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <!-- ILogger, IOptions y BackgroundService sin agregar paquetes; ya trae Configuration y DependencyInjection,
+         así que referenciarlos aparte es redundante (NU1510). Mismo camino que Storage y Replication. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="KubernetesClient" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
     <ProjectReference Include="../K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="K0sStreams.Coordination.Tests" />
   </ItemGroup>
 
 </Project>

@@ -3,6 +3,7 @@
   <ItemGroup>
     <!-- ConfigurationBuilder y ServiceCollection, sin agregar paquetes a Directory.Packages.props. -->
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
     <ProjectReference Include="../../src/K0sStreams.Coordination/K0sStreams.Coordination.csproj" />
   </ItemGroup>
 
