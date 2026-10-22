@@ -1,13 +1,18 @@
-# Broker en Kubernetes: Service headless + StatefulSet con un PVC por pod.
+# Broker en Kubernetes: 3 réplicas con un PVC cada una, Service headless entre brokers y LoadBalancer para clientes.
 #
 # En minikube:
 #   minikube start --driver=docker
 #   minikube image build -t k0sstreams/broker:dev .     # la imagen queda adentro de minikube, sin registry
 #   kubectl apply -f deploy/
 #   kubectl rollout status statefulset/broker
-#   kubectl port-forward pod/broker-0 9090:9090          # http://localhost:9090/swagger
+#   minikube service broker-lb --url                     # URL del LoadBalancer (en la cátedra la da MetalLB)
 #
-# Fase 1: un solo pod. En la fase 3 se sube replicas a 3 y se agrega el Service LoadBalancer (MetalLB).
+# Después de cambiar el código: de nuevo "minikube image build ..." y "kubectl rollout restart statefulset/broker".
+# Con el mismo tag los pods no ven la imagen nueva hasta reiniciarse ("minikube image load" no la reemplaza).
+#
+# Fase 4: el líder se elige con el Lease "k0sstreams-leader" (permisos en rbac.yaml). Para ver quién lidera y en qué época:
+#   kubectl get lease k0sstreams-leader -o yaml        # holderIdentity y leaseTransitions (la época)
+#   kubectl get lease k0sstreams-leader -w              # en vivo, mientras se mata al líder
 
 # Headless: le da a cada pod un DNS estable (broker-0.broker), que es lo que usan LeaderAddress y Replication:Peers.
 apiVersion: v1
@@ -18,6 +23,8 @@ metadata:
     app: broker
 spec:
   clusterIP: None
+  # El DNS de un pod existe aunque todavía no esté Ready: un seguidor que arranca igual tiene que recibir réplicas.
+  publishNotReadyAddresses: true
   selector:
     app: broker
   ports:
@@ -25,6 +32,22 @@ spec:
       port: 9090
     - name: grpc
       port: 9091
+---
+# Entrada única para los clientes: reparte entre los pods Ready. Solo HTTP; el gRPC queda dentro del cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker-lb
+  labels:
+    app: broker
+spec:
+  type: LoadBalancer
+  selector:
+    app: broker
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -34,7 +57,9 @@ metadata:
     app: broker
 spec:
   serviceName: broker
-  replicas: 1
+  replicas: 3
+  # Los 3 arrancan a la vez: con el orden por defecto, si broker-0 no arranca, broker-1 y broker-2 tampoco.
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: broker
@@ -43,9 +68,21 @@ spec:
       labels:
         app: broker
     spec:
+      # Con esta identidad el broker lee y renueva el Lease (rbac.yaml).
+      serviceAccountName: broker
       securityContext:
         # La imagen corre como $APP_UID (1654) y el PVC se monta como root: sin esto no puede escribir /data.
         fsGroup: 1654
+      affinity:
+        # Un broker por nodo cuando hay nodos de sobra: si los 3 caen en el mismo nodo, perder ese nodo los tira a todos.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: broker
       containers:
         - name: broker
           image: k0sstreams/broker:dev
@@ -55,6 +92,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            # Sin Coordination__LeaderId el broker elige líder con el Lease. {0} es el NodeId del líder.
+            - name: Coordination__LeaderAddressFormat
+              value: http://{0}.broker:9090
+            - name: Replication__Peers__broker-0
+              value: http://broker-0.broker:9091
+            - name: Replication__Peers__broker-1
+              value: http://broker-1.broker:9091
+            - name: Replication__Peers__broker-2
+              value: http://broker-2.broker:9091
           ports:
             - name: http
               containerPort: 9090
