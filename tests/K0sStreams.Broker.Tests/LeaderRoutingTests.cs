@@ -101,12 +101,12 @@ public sealed class LeaderRoutingTests : IDisposable
         });
         _hosts.Add(host);
         HttpClient leader = host.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
-        await leader.PostAsJsonAsync("/v1/topics", new CreateTopicRequest("pedidos"));
 
-        var response = await leader.PostAsJsonAsync("/v1/topics/pedidos/messages", new PublishRequest(null, "a"));
+        // Crear el tópico también espera el quórum (se guarda en el log), así que ya ahí se entera.
+        var response = await leader.PostAsJsonAsync("/v1/topics", new CreateTopicRequest("pedidos"));
 
         response.StatusCode.Should().Be(HttpStatusCode.TemporaryRedirect);
-        response.Headers.Location.Should().Be(new Uri("http://broker-2.broker:9090/v1/topics/pedidos/messages"));
+        response.Headers.Location.Should().Be(new Uri("http://broker-2.broker:9090/v1/topics"));
     }
 
     private HttpClient Follower(string? leaderAddress)

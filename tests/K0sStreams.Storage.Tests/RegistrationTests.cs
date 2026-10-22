@@ -1,4 +1,5 @@
 using K0sStreams.Contracts;
+using K0sStreams.Contracts.Fakes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -47,15 +48,19 @@ public class RegistrationTests
     }
 
     [Fact]
-    public void El_catalogo_de_topicos_tiene_implementacion()
+    public void El_catalogo_de_topicos_se_guarda_en_el_log()
     {
         using var services = Build([]);
 
-        services.GetService<ITopicCatalog>().Should().NotBeNull();
+        services.GetRequiredService<ITopicCatalog>().Should().BeOfType<LogTopicCatalog>();
     }
 
+    // El catálogo necesita lo que en el broker registran el host, Replication y Coordination.
     private static ServiceProvider Build(Dictionary<string, string?> settings) =>
         new ServiceCollection()
             .AddK0sStorage(new ConfigurationBuilder().AddInMemoryCollection(settings).Build())
+            .AddSingleton(TimeProvider.System)
+            .AddSingleton<IReplicator>(provider => new InstantReplicator(provider.GetRequiredService<ILog>()))
+            .AddSingleton<IClusterState>(new StaticClusterState("broker-0"))
             .BuildServiceProvider();
 }
