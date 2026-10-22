@@ -1,6 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <!-- Trae las implementaciones de Microsoft.Extensions.* (ServiceCollection, ConfigurationBuilder)
+         para poder testear AddK0sStorage. No agrega ningún paquete NuGet. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/K0sStreams.Storage/K0sStreams.Storage.csproj" />
   </ItemGroup>
 

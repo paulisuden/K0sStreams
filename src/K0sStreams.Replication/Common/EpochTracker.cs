@@ -1,6 +1,6 @@
 using K0sStreams.Contracts;
 
-namespace K0sStreams.Replication;
+namespace K0sStreams.Replication.Common;
 
 /// <summary>
 /// The epoch this broker uses for fencing: the newest of the epoch reported by coordination and the newest epoch

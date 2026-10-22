@@ -3,7 +3,7 @@ using K0sStreams.Contracts;
 using Microsoft.Extensions.Options;
 using GrpcReplication = K0sStreams.Contracts.Grpc.Replication;
 
-namespace K0sStreams.Replication;
+namespace K0sStreams.Replication.Network;
 
 /// <summary>
 /// gRPC clients for the other brokers in <see cref="ReplicationOptions.Peers"/>, by NodeId. Channels are long-lived:

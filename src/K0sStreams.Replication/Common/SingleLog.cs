@@ -1,6 +1,6 @@
 using K0sStreams.Contracts;
 
-namespace K0sStreams.Replication;
+namespace K0sStreams.Replication.Common;
 
 /// <summary>
 /// Every topic is a single log (DEC-001, docs/decisions.md). <see cref="ILog"/> and <c>replication.proto</c> still carry

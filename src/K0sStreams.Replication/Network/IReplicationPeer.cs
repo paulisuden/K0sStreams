@@ -1,9 +1,9 @@
 using K0sStreams.Contracts.Grpc;
 
-namespace K0sStreams.Replication;
+namespace K0sStreams.Replication.Network;
 
 /// <summary>
-/// The operations one broker calls on another (see <c>replication.proto</c>). <see cref="ReplicationNode"/> is the
+/// The operations one broker calls on another (see <c>replication.proto</c>). <see cref="Follower.ReplicationNode"/> is the
 /// local implementation; <see cref="GrpcReplicationPeer"/> reaches a remote broker. Invalid requests fail with an
 /// <see cref="Grpc.Core.RpcException"/> in both, so callers handle a local and a remote peer the same way.
 /// </summary>
@@ -17,4 +17,7 @@ internal interface IReplicationPeer
 
     /// <summary>Epoch, end offset, high watermark and role of the broker for one topic.</summary>
     Task<StateResponse> GetStateAsync(StateRequest request, CancellationToken ct = default);
+
+    /// <summary>The topics the broker holds a log for, after adopting the request's epoch if it's newer.</summary>
+    Task<ListTopicsResponse> ListTopicsAsync(ListTopicsRequest request, CancellationToken ct = default);
 }

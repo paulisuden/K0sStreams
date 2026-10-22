@@ -13,6 +13,8 @@ service Replication {
   rpc Fetch (FetchRequest) returns (stream RecordBatch);
   // Época, end offset y high watermark de un broker.
   rpc GetState (StateRequest) returns (StateResponse);
+  // Topics this broker has a log for. A new leader asks a majority, so it reconciles every topic (phase 4).
+  rpc ListTopics (ListTopicsRequest) returns (ListTopicsResponse);
 }
 
 message AppendRequest {
@@ -71,4 +73,15 @@ message StateResponse {
   int64 high_watermark = 3;
   string node_id = 4;
   bool is_leader = 5;
+}
+
+message ListTopicsRequest {
+  // Epoch of the broker asking. The broker answering adopts it first if it's newer, which fences the old leader.
+  int64 epoch = 1;
+}
+
+message ListTopicsResponse {
+  repeated string topics = 1;
+  // Epoch of the broker answering. Newer than the request's means the asker is no longer the leader.
+  int64 epoch = 2;
 }

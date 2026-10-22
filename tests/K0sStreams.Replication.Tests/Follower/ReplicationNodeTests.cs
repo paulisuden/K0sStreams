@@ -2,11 +2,12 @@ using Google.Protobuf;
 using Grpc.Core;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Grpc;
+using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Tests.Support;
 using static K0sStreams.Replication.Tests.Support.TestRecords;
 using Record = K0sStreams.Contracts.Record;
 
-namespace K0sStreams.Replication.Tests;
+namespace K0sStreams.Replication.Tests.Follower;
 
 /// <summary>Fetch and GetState, called directly on a node.</summary>
 public sealed class ReplicationNodeTests : IDisposable
@@ -86,6 +87,21 @@ public sealed class ReplicationNodeTests : IDisposable
         var act = () => _broker.Node.FetchAsync(request).ToListAsync().AsTask();
 
         (await act.Should().ThrowAsync<RpcException>()).Which.StatusCode.Should().Be(StatusCode.InvalidArgument);
+    }
+
+    [Fact]
+    public async Task ListTopics_returns_the_known_topics_after_adopting_a_newer_epoch()
+    {
+        var payments = Append(1, -1, 0, -1, Message(0, 1));
+        payments.Topic = "payments";
+        await _broker.Node.AppendAsync(Append(1, -1, 0, -1, Message(0, 1)));
+        await _broker.Node.AppendAsync(payments);
+
+        var response = await _broker.Node.ListTopicsAsync(new ListTopicsRequest { Epoch = 3 });
+
+        response.Topics.Should().Equal("orders", "payments");
+        response.Epoch.Should().Be(3);
+        (await _broker.Node.AppendAsync(Append(2, 0, 1, -1))).Code.Should().Be(AppendError.StaleEpoch);
     }
 
     [Fact]
