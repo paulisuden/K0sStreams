@@ -14,16 +14,47 @@ internal static class ApiEndpoints
     {
         RouteGroupBuilder topics = endpoints.MapGroup("/v1/topics");
 
-        topics.MapPost("/", CreateTopicAsync);
-        topics.MapPost("/{topic}/messages", PublishAsync);
+        // Lo que escribe en el log o usa el estado de la cola lo atiende el líder. Leer el historial no: los seguidores
+        // tienen el log replicado hasta el high watermark.
+        topics.MapPost("/", CreateTopicAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/messages", PublishAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapGet("/{topic}/partitions/{partition:int}/messages", ReadAsync);
-        topics.MapPost("/{topic}/queues/{queue}/receive", ReceiveAsync);
-        topics.MapPost("/{topic}/queues/{queue}/ack/{partition:int}/{offset:long}", AckAsync);
-        topics.MapPost("/{topic}/queues/{queue}/nack/{partition:int}/{offset:long}", NackAsync);
-        topics.MapGet("/{topic}/queues/{queue}/dlq", GetDeadLettersAsync);
+        topics.MapPost("/{topic}/queues/{queue}/receive", ReceiveAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/ack/{partition:int}/{offset:long}", AckAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/nack/{partition:int}/{offset:long}", NackAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapGet("/{topic}/queues/{queue}/dlq", GetDeadLettersAsync).AddEndpointFilter(LeaderOnlyAsync);
 
         return endpoints;
     }
+
+    /// <summary>En un seguidor, no ejecuta la ruta: redirige el pedido al líder.</summary>
+    private static async ValueTask<object?> LeaderOnlyAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        IClusterState cluster = context.HttpContext.RequestServices.GetRequiredService<IClusterState>();
+        if (!cluster.IsLeader)
+        {
+            return RedirectToLeader(cluster, context.HttpContext.Request);
+        }
+
+        try
+        {
+            return await next(context).ConfigureAwait(false);
+        }
+        catch (NotLeaderException)
+        {
+            // Dejó de ser líder esperando el quórum: lo escrito no quedó confirmado y el cliente lo reintenta en el nuevo.
+            return RedirectToLeader(cluster, context.HttpContext.Request);
+        }
+    }
+
+    /// <summary>
+    /// 307 conserva el método y el cuerpo, así que el cliente repite el mismo pedido en el líder. Sin líder conocido (por
+    /// ejemplo, en medio de un failover) responde 503 para que el cliente reintente.
+    /// </summary>
+    private static IResult RedirectToLeader(IClusterState cluster, HttpRequest request) =>
+        cluster.LeaderAddress is null
+            ? Results.Problem("No hay un líder conocido; reintentar en unos segundos.", statusCode: StatusCodes.Status503ServiceUnavailable)
+            : Results.Redirect(cluster.LeaderAddress.TrimEnd('/') + request.Path + request.QueryString, permanent: false, preserveMethod: true);
 
     private static async Task<IResult> CreateTopicAsync(
         CreateTopicRequest request,
@@ -61,8 +92,7 @@ internal static class ApiEndpoints
             });
         }
 
-        TopicConfig? topicConfig = catalog.Find(topic);
-        if (topicConfig is null)
+        if (catalog.Find(topic) is null)
         {
             return Results.NotFound(new { error = $"El tópico '{topic}' no existe." });
         }
@@ -71,33 +101,12 @@ internal static class ApiEndpoints
         long deliverAt = request.DeliverAt?.ToUnixTimeMilliseconds() ?? 0;
         var record = Record.NewMessage(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds(), key, Encoding.UTF8.GetBytes(request.Value), deliverAt);
 
-        int partition = Partitioner.ForKey(key.Span, topicConfig.Partitions);
-        if (!cluster.IsLeader)
-        {
-            // Fase 1: el líder es conocido por Coordinación; si no lo somos, redirigimos.
-            if (cluster.LeaderAddress is not null)
-            {
-                return Results.Redirect(cluster.LeaderAddress.TrimEnd('/') + $"/v1/topics/{topic}/messages", true, false);
-            }
-
-            return Results.StatusCode(StatusCodes.Status307TemporaryRedirect);
-        }
+        // Cada tópico es un solo log (DEC-001): todo va a la partición 0, la única que acepta la replicación.
+        const int partition = 0;
 
         // Solo el líder escribe. La replicación sube el high watermark cuando hay quórum.
         long offset = await log.AppendAsync(topic, partition, record, ct).ConfigureAwait(false);
-        try
-        {
-            await replicator.WaitForQuorumAsync(topic, partition, offset, ct).ConfigureAwait(false);
-        }
-        catch (NotLeaderException)
-        {
-            if (cluster.LeaderAddress is not null)
-            {
-                return Results.Redirect(cluster.LeaderAddress.TrimEnd('/') + $"/v1/topics/{topic}/messages", true, false);
-            }
-
-            throw;
-        }
+        await replicator.WaitForQuorumAsync(topic, partition, offset, ct).ConfigureAwait(false);
 
         return Results.Ok(new PublishResponse(partition, offset));
     }

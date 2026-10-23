@@ -1,5 +1,4 @@
 using K0sStreams.Contracts;
-using K0sStreams.Contracts.Fakes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -23,9 +22,9 @@ public static class ServiceCollectionExtensions
             SegmentedLog.DefaultSegmentBytes,
             provider.GetService<ILogger<SegmentedLog>>()));
 
-        // Sigue en memoria: quién persiste los tópicos es un tema abierto del equipo
-        // (docs/contexto.md, punto 1), porque crear un tópico también debería replicarse.
-        services.AddSingleton<ITopicCatalog, InMemoryTopicCatalog>();
+        // Los tópicos se guardan en el mismo log, replicados por quórum (DEC-003). Necesita IReplicator e IClusterState,
+        // que registran Replication y Coordination.
+        services.AddSingleton<ITopicCatalog, LogTopicCatalog>();
         return services;
     }
 

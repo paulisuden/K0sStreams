@@ -11,10 +11,15 @@ namespace K0sStreams.Queue;
 /// <param name="log">Log append-only. Única fuente de verdad.</param>
 /// <param name="catalog">Tópicos existentes y su configuración.</param>
 /// <param name="cluster">Rol y época de este broker.</param>
+/// <param name="replicator">Confirma cada evento de cola por quórum, igual que un mensaje.</param>
 /// <param name="time">Reloj, inyectado para poder probar el visibility timeout.</param>
-public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState cluster, TimeProvider time) : IQueueEngine
+public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState cluster, IReplicator replicator, TimeProvider time) : IQueueEngine, IDisposable
 {
     private readonly ConcurrentDictionary<string, QueueState> _queues = new(StringComparer.Ordinal);
+
+    // Época en la que se releyó cada tópico desde el log, y un semáforo para que se relea una sola vez (ver EnsureRebuiltAsync).
+    private readonly ConcurrentDictionary<string, long> _rebuiltInEpoch = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _rebuilding = new(1, 1);
 
     /// <inheritdoc />
     public async ValueTask<Delivery?> ReceiveAsync(string topic, string queue, TimeSpan visibility, CancellationToken ct = default)
@@ -25,6 +30,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
 
         TopicConfig? topicConfig = catalog.Find(topic) ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+        await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
         QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
 
         // Se lee hasta el high watermark, no hasta el end offset: un mensaje que todavía no
@@ -98,6 +104,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
     /// <inheritdoc />
     public async ValueTask<bool> AckAsync(string topic, string queue, int partition, long offset, CancellationToken ct = default)
     {
+        await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
         QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
         if (!state.TryAcknowledge(partition, offset))
         {
@@ -120,6 +127,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             return false;
         }
 
+        await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
         QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
         int? attempt = state.GetAttempt(partition, offset);
         if (attempt is null || attempt.Value == 0)
@@ -138,7 +146,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             state.MarkDeadLetter(partition, offset);
             await AppendEventAsync(
                 topic,
-                new QueueEvent(RecordType.Nack, queue, partition, offset, now.ToUnixTimeMilliseconds(), reason),
+                // UntilMs 0: sin próximo intento. Así Apply lo reconstruye como DLQ y no como un reintento programado.
+                new QueueEvent(RecordType.Nack, queue, partition, offset, UntilMs: 0, reason),
                 ct).ConfigureAwait(false);
             return true;
         }
@@ -168,6 +177,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             return [];
         }
 
+        // El contrato es sincrónico: se espera la relectura igual que GetDeadLetters ya espera la lectura del log.
+        EnsureRebuiltAsync(topic, CancellationToken.None).AsTask().GetAwaiter().GetResult();
         QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
         return state.GetDeadLetters(topic, queue, log);
     }
@@ -186,7 +197,71 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         state.Apply(replayed);
     }
 
+    public void Dispose() => _rebuilding.Dispose();
+
     private static string Key(string topic, string queue) => $"{topic}/{queue}";
+
+    /// <summary>
+    /// Relee del log los eventos de cola del tópico la primera vez que se usa en cada época. La memoria puede no coincidir
+    /// con el log, que es la fuente de verdad, al arrancar (está vacía) y al cambiar de líder (otro líder pudo escribir
+    /// eventos mientras tanto).
+    /// </summary>
+    private async ValueTask EnsureRebuiltAsync(string topic, CancellationToken ct)
+    {
+        long epoch = cluster.CurrentEpoch;
+        if (IsRebuilt(topic, epoch))
+        {
+            return;
+        }
+
+        // Uno a la vez: si dos pedidos releyeran a la vez, cada evento se aplicaría dos veces.
+        await _rebuilding.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (IsRebuilt(topic, epoch))
+            {
+                return;
+            }
+
+            foreach (string key in _queues.Keys.Where(key => key.StartsWith(topic + "/", StringComparison.Ordinal)))
+            {
+                _queues.TryRemove(key, out _);
+            }
+
+            await ReplayAsync(topic, ct).ConfigureAwait(false);
+            _rebuiltInEpoch[topic] = epoch;
+        }
+        finally
+        {
+            _rebuilding.Release();
+        }
+    }
+
+    private bool IsRebuilt(string topic, long epoch) => _rebuiltInEpoch.TryGetValue(topic, out long rebuilt) && rebuilt == epoch;
+
+    /// <summary>
+    /// Aplica todos los eventos del log, no solo hasta el high watermark: un líder nuevo termina confirmando todo su log.
+    /// Solo la partición 0, porque cada tópico es un solo log (DEC-001).
+    /// </summary>
+    private async ValueTask ReplayAsync(string topic, CancellationToken ct)
+    {
+        long next = 0;
+        while (true)
+        {
+            int read = 0;
+            await foreach (var record in log.ReadAsync(topic, 0, next, BatchSize, ct).ConfigureAwait(false))
+            {
+                Apply(topic, record);
+                next = record.Offset + 1;
+                read++;
+            }
+
+            if (read == 0)
+            {
+                return;
+            }
+        }
+    }
 
     private static IEnumerable<int> PartitionsRange(int partitions)
     {
@@ -196,12 +271,19 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
     }
 
-    private async ValueTask AppendEventAsync(string topic, QueueEvent queueEvent, CancellationToken ct) =>
-        await log.AppendAsync(
+    /// <summary>
+    /// Escribe el evento y espera el quórum antes de responder, igual que un mensaje: si el líder cayera antes, el
+    /// nuevo líder podría no tener, por ejemplo, un ack ya confirmado al cliente, y volvería a entregar el mensaje.
+    /// </summary>
+    private async ValueTask AppendEventAsync(string topic, QueueEvent queueEvent, CancellationToken ct)
+    {
+        long offset = await log.AppendAsync(
             topic,
             queueEvent.Partition,
             queueEvent.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
             ct).ConfigureAwait(false);
+        await replicator.WaitForQuorumAsync(topic, queueEvent.Partition, offset, ct).ConfigureAwait(false);
+    }
 
     private const int BatchSize = 512;
 

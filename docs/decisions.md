@@ -181,3 +181,38 @@ sequenceDiagram
 - **Truncate to the HW on an epoch change** (the current plan). It loses confirmed records (see Context).
 - **New proto fields `StateRequest.epoch` and `StateResponse.last_epoch`** (the first proposal in replication.md §10.1). `GetState` doesn't take the topic's lock, so it can race with an append the old leader still has in flight. An empty `Append` at the new epoch takes that lock, and needs no field. The last record's epoch comes from `Fetch(end_offset, 1)`.
 - **Only "in-sync" brokers may take the Lease** (Kafka's ISR). It needs the in-sync set stored somewhere consistent, which is more work for D, and the new leader still has to catch up.
+
+---
+
+## DEC-003 · Store the topic catalog in the log
+
+| | |
+| --- | --- |
+| Date | 22 Oct 2026 |
+| Proposed by | D, Platform and coordination |
+| Status | Agreed with A and B, who asked D to implement it. Done on `fix/failover-state`. |
+
+### Context
+
+The topic catalog lived only in memory (`InMemoryTopicCatalog`, open issue 1 in contexto.md). With failover working (phase 4), that showed up right away: after a restart or a leader change, the new leader didn't know any topic and the API answered 404 for every one, although their messages were on disk and replicated.
+
+### Decision
+
+**Each created topic is a record in an internal topic, `k0s.topics`, in the same log as the messages.** Creating a topic appends the record (key: the name; value: the `TopicConfig` as JSON) and waits for the quorum, like publishing. Any broker builds its in-memory copy by reading `k0s.topics` up to the high watermark: a restarted broker, a follower, or a new leader.
+
+- The internal topic needs a valid name, because replication rejects the rest (`TopicConfig.IsValidName`). So `k0s.topics` is reserved: creating a topic with that name answers 409.
+- `ITopicCatalog.Find` is synchronous, so on an unknown name it reads the new records of `k0s.topics` blocking. The internal topic has one record per topic, so it stays small.
+- A topic exists once its creation has a quorum, like a message.
+
+### What changes
+
+| Where | Change |
+| --- | --- |
+| **A**, Storage | New `LogTopicCatalog`, registered instead of `InMemoryTopicCatalog` (which stays as a fake for tests). It needs `IReplicator` and `IClusterState`. |
+| **B**, API | Creating a topic goes to the leader (307 from a follower), like every other write. |
+| Contracts | Nothing. |
+
+### Alternatives considered
+
+- **Derive the topics from the logs on disk.** Simpler, but the configuration the client asked for (`maxRetries`, `retryBackoff`) would be lost.
+- **A file next to the log.** Breaks "everything on disk goes through `ILog`", and would need its own replication.

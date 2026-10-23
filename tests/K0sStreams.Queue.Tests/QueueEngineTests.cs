@@ -10,7 +10,7 @@ namespace K0sStreams.Queue.Tests;
 /// Tests del motor de cola sobre el log en memoria: orden, visibilidad, ack y replay.
 /// Fases 1: receive, ack, visibility timeout y <c>Apply</c>. Nack/DLQ/programados llegan en la fase 2.
 /// </summary>
-public sealed class QueueEngineTests
+public sealed class QueueEngineTests : IDisposable
 {
     private static readonly DateTimeOffset Epoch = new(2026, 10, 1, 0, 0, 0, TimeSpan.Zero);
 
@@ -24,8 +24,10 @@ public sealed class QueueEngineTests
     public QueueEngineTests()
     {
         _replicator = new InstantReplicator(_log);
-        _engine = new QueueEngine(_log, _catalog, _cluster, _time);
+        _engine = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
     }
+
+    public void Dispose() => _engine.Dispose();
 
     /// <summary>
     /// Publica un mensaje y lo confirma por quórum, igual que haría la API: sin avanzar el
@@ -261,6 +263,102 @@ public sealed class QueueEngineTests
     }
 
     [Fact]
+    public async Task Cada_evento_de_cola_queda_confirmado_por_quorum_antes_de_responder()
+    {
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a");
+
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await _engine.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset);
+
+        // Offsets: 0 el mensaje, 1 el receive, 2 el ack. El high watermark solo llega a 2 si el ack tuvo quórum.
+        _log.HighWatermark("pedidos", 0).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Si_deja_de_ser_lider_esperando_el_quorum_el_receive_falla_con_NotLeaderException()
+    {
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a");
+        var engine = new QueueEngine(_log, _catalog, _cluster, new NotLeaderReplicator(), _time);
+
+        var receive = async () => await engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+
+        await receive.Should().ThrowAsync<NotLeaderException>();
+    }
+
+    [Fact]
+    public async Task Un_motor_nuevo_reconstruye_la_cola_desde_el_log_sin_que_nadie_llame_a_Apply()
+    {
+        // Como un broker que se reinicia: la memoria arranca vacía y el log tiene todo.
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a", "b", "c");
+        await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var b = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await _engine.AckAsync("pedidos", "facturacion", b!.Partition, b.Offset);
+
+        using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+
+        // a sigue en proceso y b está confirmado: lo próximo es c.
+        (await restarted.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(2);
+
+        _time.Advance(TimeSpan.FromSeconds(31));
+        var again = await restarted.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        again!.Offset.Should().Be(0);
+        again.Attempt.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Al_cambiar_de_epoca_relee_lo_que_escribio_otro_lider()
+    {
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a");
+        var cluster = new ChangingClusterState();
+        using var engine = new QueueEngine(_log, _catalog, cluster, _replicator, _time);
+        var delivery = await engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+
+        // Otro broker lidera la época 2 y confirma el mensaje. El log compartido hace de replicación.
+        using var otherLeader = new QueueEngine(_log, _catalog, new ChangingClusterState { CurrentEpoch = 2 }, _replicator, _time);
+        (await otherLeader.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset)).Should().BeTrue();
+
+        // Este broker vuelve a liderar en la época 3. Sin releer, creería que el mensaje sigue en proceso y lo
+        // entregaría de nuevo al vencer la visibilidad.
+        cluster.CurrentEpoch = 3;
+        _time.Advance(TimeSpan.FromSeconds(31));
+
+        (await engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task La_DLQ_sobrevive_a_un_reinicio()
+    {
+        await CreateTopicAsync(maxRetries: 0);
+        await AppendMessagesAsync("pedidos", 0, "a");
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await _engine.NackAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset, "rompe");
+
+        using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+
+        restarted.GetDeadLetters("pedidos", "facturacion").Should().ContainSingle().Which.Offset.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Receives_concurrentes_en_un_motor_nuevo_releen_el_log_una_sola_vez()
+    {
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a");
+        await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        _time.Advance(TimeSpan.FromSeconds(31));
+
+        using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+        var deliveries = await Task.WhenAll(Enumerable.Range(0, 8).Select(
+            _ => restarted.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)).AsTask()));
+
+        // Si se releyera dos veces, el receive anterior contaría doble y este sería el intento 3.
+        deliveries.Should().ContainSingle(delivery => delivery != null).Which!.Attempt.Should().Be(2);
+    }
+
+    [Fact]
     public async Task Apply_reconstruye_el_estado_de_los_mensajes_en_proceso()
     {
         await CreateTopicAsync();
@@ -268,7 +366,7 @@ public sealed class QueueEngineTests
         await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
         (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
 
-        var recovered = new QueueEngine(_log, _catalog, _cluster, _time);
+        var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
             if (QueueEvent.IsQueueEvent(record.Type))
@@ -290,7 +388,7 @@ public sealed class QueueEngineTests
 
         await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
 
-        var recovered = new QueueEngine(_log, _catalog, _cluster, _time);
+        var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
             if (QueueEvent.IsQueueEvent(record.Type))
@@ -316,7 +414,7 @@ public sealed class QueueEngineTests
         var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
         await _engine.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset);
 
-        var recovered = new QueueEngine(_log, _catalog, _cluster, _time);
+        var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
             if (QueueEvent.IsQueueEvent(record.Type))
@@ -335,12 +433,37 @@ public sealed class QueueEngineTests
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
 
-        var recovered = new QueueEngine(_log, _catalog, _cluster, _time);
+        var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
             recovered.Apply("pedidos", record);
         }
 
         (await recovered.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
+    }
+}
+
+/// <summary>Un líder que perdió el liderazgo mientras esperaba el quórum.</summary>
+internal sealed class NotLeaderReplicator : IReplicator
+{
+    public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default) =>
+        ValueTask.FromException(new NotLeaderException("Otro broker es el líder."));
+}
+
+/// <summary>Un broker que siempre es líder, con una época que el test puede cambiar.</summary>
+internal sealed class ChangingClusterState : IClusterState
+{
+    public string NodeId => "broker-0";
+
+    public bool IsLeader => true;
+
+    public long CurrentEpoch { get; set; } = 1;
+
+    public string? LeaderAddress => null;
+
+    public event Action<long>? EpochChanged
+    {
+        add { }
+        remove { }
     }
 }
