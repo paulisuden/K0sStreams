@@ -142,11 +142,12 @@ internal static class ApiEndpoints
         // Solo hasta el high watermark: no se muestra un mensaje que todavía podría perderse.
         await foreach (var record in log.ReadAsync(topic, partition, fromOffset, limit, ct).ConfigureAwait(false))
         {
-            nextOffset = record.Offset + 1;
             if (record.Offset > highWatermark)
             {
                 break;
             }
+
+            nextOffset = record.Offset + 1;
 
             // En el mismo log conviven mensajes y eventos de cola; el historial solo muestra mensajes.
             if (record.Type != RecordType.Message)

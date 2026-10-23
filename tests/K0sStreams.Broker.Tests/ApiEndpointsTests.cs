@@ -1,7 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
+using K0sStreams.Contracts;
 using K0sStreams.Contracts.Api;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace K0sStreams.Broker.Tests;
 
@@ -12,9 +14,14 @@ namespace K0sStreams.Broker.Tests;
 /// </summary>
 public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Program>>
 {
+    private readonly WebApplicationFactory<Program> _factory;
     private readonly HttpClient _client;
 
-    public ApiEndpointsTests(WebApplicationFactory<Program> factory) => _client = factory.CreateClient();
+    public ApiEndpointsTests(WebApplicationFactory<Program> factory)
+    {
+        _factory = factory;
+        _client = factory.CreateClient();
+    }
 
     /// <summary>Nombre de tópico único por test, para que los singletons del host no se pisen.</summary>
     private static string NewTopic() => $"t{Guid.NewGuid():N}";
@@ -118,6 +125,23 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
         read.Messages[0].Key.Should().Be("k1");
         read.Messages[0].Value.Should().Be("a");
         read.Messages[1].Value.Should().Be("b");
+    }
+
+    [Fact]
+    public async Task Leer_no_saltea_el_primer_mensaje_pasado_el_high_watermark()
+    {
+        string topic = NewTopic();
+        await CreateTopicAsync(topic);
+        await PublishAsync(topic, "a");
+        // Escrito en el log pero sin quórum todavía: queda pasado el high watermark.
+        ILog log = _factory.Services.GetRequiredService<ILog>();
+        await log.AppendAsync(topic, 0, Contracts.Record.NewMessage(1, 0, ReadOnlyMemory<byte>.Empty, "b"u8.ToArray()));
+
+        ReadResponse? read = await _client.GetFromJsonAsync<ReadResponse>($"/v1/topics/{topic}/partitions/0/messages?from=0&max=10");
+
+        read!.Messages.Should().ContainSingle().Which.Value.Should().Be("a");
+        // El cliente sigue leyendo desde NextOffset: si apuntara a 2, nunca vería "b" cuando se confirme.
+        read.NextOffset.Should().Be(1);
     }
 
     [Fact]
