@@ -8,6 +8,7 @@
 docs/
 tests/
 chaos/
+bench/
 deploy/
 *.md
 *.pdf

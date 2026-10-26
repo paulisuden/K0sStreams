@@ -1,0 +1,14 @@
+# Un tópico declarado con la CRD Topic (deploy/topic-crd.yaml). Va en una subcarpeta porque "kubectl apply -f deploy/"
+# no entra en subcarpetas: si se aplicara en la misma pasada que la CRD, Kubernetes todavía no conocería el tipo Topic.
+#
+#   kubectl apply -f deploy/examples/topic.yaml
+#   kubectl get topics
+#   curl $(minikube service broker-lb --url)/v1/topics      # aparece en menos de 5 s
+apiVersion: k0sstreams.io/v1
+kind: Topic
+metadata:
+  name: pedidos
+spec:
+  partitions: 1
+  maxRetries: 3
+  retryBackoffSeconds: 5

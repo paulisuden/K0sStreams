@@ -1,7 +1,9 @@
-# Permisos del broker sobre el API server de Kubernetes: solo leer, crear y renovar el Lease del líder (fase 4).
+# Permisos del broker sobre el API server de Kubernetes: leer, crear y renovar el Lease del líder (fase 4) y listar los
+# Topic de la CRD (fase 5).
 #
 # Comprobar que el permiso alcanza, sin levantar nada:
 #   kubectl auth can-i update leases --as=system:serviceaccount:default:broker
+#   kubectl auth can-i list topics.k0sstreams.io --as=system:serviceaccount:default:broker
 
 # La identidad con la que el pod habla con el API server. El StatefulSet la usa en serviceAccountName.
 apiVersion: v1
@@ -37,4 +39,31 @@ subjects:
   - kind: ServiceAccount
     name: broker
     # Kubernetes exige el namespace de la ServiceAccount. Si se despliega en otro, cambiarlo acá y en el can-i de arriba.
+    namespace: default
+---
+# Para la CRD Topic: el líder solo lista. No hace falta watch (lista cada 5 s) ni escribir (el Topic no tiene status).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: broker-topic-reader
+  labels:
+    app: broker
+rules:
+  - apiGroups: [k0sstreams.io]
+    resources: [topics]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: broker-topic-reader
+  labels:
+    app: broker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: broker-topic-reader
+subjects:
+  - kind: ServiceAccount
+    name: broker
     namespace: default
