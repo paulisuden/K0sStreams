@@ -1,0 +1,67 @@
+# CRD Topic (fase 5): le enseña a Kubernetes qué es un Topic, para crear tópicos con kubectl apply en vez de POST /v1/topics.
+# Kubernetes solo lo guarda; el que lo convierte en tópico es el líder (TopicReconciler, cada 5 s). Ver docs/topic-crd.md.
+#
+#   kubectl apply -f deploy/examples/topic.yaml
+#   kubectl get topics
+#
+# Editar o borrar un Topic no cambia el tópico: el catálogo de tópicos no tiene modificar ni borrar.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  # Tiene que ser <plural>.<group>.
+  name: topics.k0sstreams.io
+spec:
+  group: k0sstreams.io
+  scope: Namespaced
+  names:
+    kind: Topic
+    singular: topic
+    plural: topics
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Partitions
+          type: integer
+          jsonPath: .spec.partitions
+        - name: MaxRetries
+          type: integer
+          jsonPath: .spec.maxRetries
+        - name: Backoff
+          type: integer
+          jsonPath: .spec.retryBackoffSeconds
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          # El nombre del objeto es el del tópico. Kubernetes ya exige minúsculas, dígitos, '.' y '-'; faltan las reglas
+          # propias de TopicConfig.IsValidName y el nombre reservado del catálogo (DEC-003).
+          x-kubernetes-validations:
+            - rule: self.metadata.name.size() <= 100
+              message: El nombre del tópico tiene hasta 100 caracteres.
+            - rule: self.metadata.name != 'k0s.topics'
+              message: k0s.topics es el tópico interno del catálogo.
+          properties:
+            spec:
+              type: object
+              # Sin spec, Kubernetes lo completa con los valores por defecto de abajo: los mismos que POST /v1/topics.
+              default: {}
+              properties:
+                partitions:
+                  type: integer
+                  minimum: 1
+                  maximum: 64
+                  default: 1
+                maxRetries:
+                  description: Reintentos después del primer intento antes de ir a la DLQ.
+                  type: integer
+                  minimum: 0
+                  default: 3
+                retryBackoffSeconds:
+                  description: Espera base entre reintentos; crece de forma exponencial.
+                  type: integer
+                  minimum: 0
+                  default: 5

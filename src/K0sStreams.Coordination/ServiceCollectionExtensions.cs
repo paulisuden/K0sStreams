@@ -4,6 +4,7 @@ using K0sStreams.Contracts.Fakes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace K0sStreams.Coordination;
@@ -45,8 +46,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IKubernetes>(static sp => new Kubernetes(sp.GetRequiredService<KubernetesClientConfiguration>()));
         services.AddSingleton<ILeaseStore>(static sp => new KubernetesLeaseStore(
             sp.GetRequiredService<IKubernetes>(),
-            sp.GetRequiredService<KubernetesClientConfiguration>().Namespace
-                ?? throw new InvalidOperationException("No se sabe en qué namespace corre el pod."),
+            PodNamespace(sp),
             sp.GetRequiredService<IOptions<CoordinationOptions>>(),
             sp.GetRequiredService<TimeProvider>()));
 
@@ -58,6 +58,19 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<LeaderElector>();
         services.AddHostedService(static sp => sp.GetRequiredService<LeaderElector>());
+
+        // Fase 5: los tópicos declarados con la CRD Topic (deploy/topic-crd.yaml). El catálogo lo registra el almacenamiento.
+        services.AddHostedService(static sp => new TopicReconciler(
+            sp.GetRequiredService<IKubernetes>(),
+            PodNamespace(sp),
+            sp.GetRequiredService<ITopicCatalog>(),
+            sp.GetRequiredService<IClusterState>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetRequiredService<ILogger<TopicReconciler>>()));
         return services;
     }
+
+    private static string PodNamespace(IServiceProvider sp) =>
+        sp.GetRequiredService<KubernetesClientConfiguration>().Namespace
+            ?? throw new InvalidOperationException("No se sabe en qué namespace corre el pod.");
 }

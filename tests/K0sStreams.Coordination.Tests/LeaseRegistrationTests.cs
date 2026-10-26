@@ -1,4 +1,5 @@
 using K0sStreams.Contracts;
+using K0sStreams.Contracts.Fakes;
 using K0sStreams.Coordination.Tests.Support;
 using k8s;
 using Microsoft.Extensions.Configuration;
@@ -23,11 +24,12 @@ public class LeaseRegistrationTests
     }
 
     [Fact]
-    public void Con_Lease_el_elector_corre_como_servicio_de_fondo()
+    public void Con_Lease_el_elector_y_la_CRD_Topic_corren_como_servicios_de_fondo()
     {
         using var provider = Provider([]);
 
-        provider.GetServices<IHostedService>().Should().ContainSingle().Which.Should().BeOfType<LeaderElector>();
+        provider.GetServices<IHostedService>().Select(service => service.GetType())
+            .Should().Equal(typeof(LeaderElector), typeof(TopicReconciler));
     }
 
     [Fact]
@@ -54,6 +56,7 @@ public class LeaseRegistrationTests
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddSingleton<ILeaderPromotion, FakePromotion>();
+        services.AddSingleton<ITopicCatalog, InMemoryTopicCatalog>();
 
         // Lo que dentro del pod sale de la ServiceAccount: acá, un API server que nadie llama.
         services.AddSingleton(new KubernetesClientConfiguration { Host = "http://api-server.test", Namespace = "k0s" });
