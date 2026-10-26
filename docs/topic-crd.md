@@ -39,7 +39,7 @@ Los valores por defecto son los mismos que en `POST /v1/topics`. Kubernetes los 
 
 - **Editar un `Topic` no cambia el tópico**, y **borrarlo no borra el tópico.** El catálogo no tiene modificar ni borrar, y el plan no los pide.
 - Si el tópico ya existía (creado por la API), el `Topic` no lo toca, aunque diga otra configuración.
-- El `Topic` no tiene `status`: el resultado se ve con `GET /v1/topics` o en los logs del líder (`Tópico ... creado desde la CRD Topic`). Escribir un `status` necesitaría permiso de escritura sobre `topics/status`.
+- El `Topic` no tiene `status`: el resultado se ve leyendo el tópico (`GET /v1/topics/{nombre}/partitions/0/messages` responde 404 si no existe) o en los logs del líder (`Tópico ... creado desde la CRD Topic`). Escribir un `status` necesitaría permiso de escritura sobre `topics/status`.
 
 ## 5. Piezas
 

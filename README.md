@@ -4,7 +4,7 @@ Broker de mensajes distribuido escrito en .NET. Corre como 3 pods en un cluster 
 
 Proyecto de la materia **Middlewares Distribuidos** (2026).
 
-> **Estado:** en desarrollo. Está la base de la fase 0: solución, contratos, fakes en memoria, CI y Dockerfile. Cada bloque se desarrolla en su rama `feature/*` (ver [Plan de desarrollo](#plan-de-desarrollo)).
+> **Estado:** fases 0 a 4 terminadas y fase 5 (caos, CRD Topic y benchmark) implementada. **0 mensajes confirmados perdidos en 25 ejecuciones** de la suite de caos (ver [Resultados](#resultados)). Cada bloque se desarrolla en su rama `feature/*` (ver [Plan de desarrollo](#plan-de-desarrollo)).
 
 ---
 
@@ -54,6 +54,18 @@ Las decisiones principales:
 4. Si el líder viejo vuelve, sus mensajes llevan una época vieja y se rechazan. Se reincorpora como seguidor.
 
 El detalle completo (flujos, formato en disco, contratos) está en [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md).
+
+## Resultados
+
+**0 mensajes confirmados perdidos en 25 ejecuciones** de la suite de caos (minikube, 3 brokers): muerte del líder con y sin aviso, de un seguidor, del líder y un seguidor a la vez (sin quórum) y tres muertes de líder seguidas. Escenarios, criterios y tabla completa en [docs/chaos.md](docs/chaos.md).
+
+Benchmark en minikube de un nodo, directo al líder, mensajes de 100 bytes ([docs/benchmark.md](docs/benchmark.md)):
+
+| Operación | 1 cliente | 50 clientes |
+| --- | --- | --- |
+| Publicar (confirmado por quórum) | 506 msgs/s · p50 1,8 ms | 1066 msgs/s · p50 45 ms |
+| Leer como historial | 165 000 msgs/s · p50 0,3 ms | 760 000 msgs/s · p50 4,7 ms |
+| Consumir como cola (receive + ack) | 192 msgs/s · p50 4,8 ms | 209 msgs/s · p50 232 ms |
 
 ## API REST
 
@@ -107,6 +119,7 @@ K0sStreams/
 ├─ tests/                       un proyecto xUnit por cada proyecto de src/
 ├─ deploy/                      manifiestos de Kubernetes (StatefulSet, Service, RBAC, CRD)
 ├─ chaos/                       pruebas de caos y verificador de pérdida de mensajes
+├─ bench/                       benchmark con k6
 └─ docs/                        arquitectura, análisis y diagramas
 ```
 
@@ -141,6 +154,7 @@ dotnet run --project src/K0sStreams.Broker
 ```bash
 minikube start --driver=docker
 kubectl get storageclass          # debe haber una clase por defecto para los PVC
+minikube image build -t k0sstreams/broker:dev .
 kubectl apply -f deploy/
 kubectl get pods -w               # esperar a broker-0, broker-1 y broker-2
 ```
@@ -148,7 +162,8 @@ kubectl get pods -w               # esperar a broker-0, broker-1 y broker-2
 **Crear un tópico con kubectl** (CRD, fase 5):
 
 ```bash
-kubectl apply -f deploy/topic.yaml
+kubectl apply -f deploy/examples/topic.yaml
+kubectl get topics
 ```
 
 ## Plan de desarrollo
@@ -174,7 +189,7 @@ Si hay atraso se recorta, en este orden: CRD Topic, Server-Sent Events, varias p
 | A — Almacenamiento | Log en disco, índice, CRC32, group commit, recuperación | `Storage` |
 | B — Cola y API | Motor de cola y API HTTP + Swagger | `Queue`, `Broker` |
 | C — Replicación | gRPC, quórum 2 de 3, high watermark, puesta al día de seguidores | `Replication` |
-| D — Plataforma y coordinación | CI, Docker, Kubernetes, Lease, épocas, fencing, CRD, caos | `Coordination`, `deploy/`, `chaos/`, `.github/` |
+| D — Plataforma y coordinación | CI, Docker, Kubernetes, Lease, épocas, fencing, CRD, caos, benchmark | `Coordination`, `deploy/`, `chaos/`, `bench/`, `.github/` |
 
 ## Cómo contribuir
 
@@ -187,5 +202,6 @@ Si hay atraso se recorta, en este orden: CRD Topic, Server-Sent Events, varias p
 ## Documentación
 
 - [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md): documento técnico completo (flujos, interfaces C#, formato en disco, servicio gRPC).
+- [docs/chaos.md](docs/chaos.md), [docs/benchmark.md](docs/benchmark.md) y [docs/topic-crd.md](docs/topic-crd.md): suite de caos, benchmark y CRD Topic.
 - [Documento técnico en línea](https://claude.ai/artifact/Wfp6im7Nn4MuKNvBEVtbDu): la misma arquitectura, con diagramas renderizados.
 - [docs/K0sStreams_Analisis_y_Plan(1).docx.pdf](<docs/K0sStreams_Analisis_y_Plan(1).docx.pdf>): análisis inicial y estimación de horas.

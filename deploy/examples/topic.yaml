@@ -3,7 +3,7 @@
 #
 #   kubectl apply -f deploy/examples/topic.yaml
 #   kubectl get topics
-#   curl $(minikube service broker-lb --url)/v1/topics      # aparece en menos de 5 s
+#   curl -s -o /dev/null -w "%{http_code}\n" "$(minikube service broker-lb --url)/v1/topics/pedidos/partitions/0/messages?max=1"   # 200 en menos de 5 s (404 si no existe)
 apiVersion: k0sstreams.io/v1
 kind: Topic
 metadata:
