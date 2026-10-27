@@ -195,6 +195,15 @@ select {
   background: var(--panel-solid);
 }
 
+input.text {
+  width: 130px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-solid);
+  font-family: var(--mono);
+}
+
 input[type='range'] {
   width: 120px;
   accent-color: var(--follower);

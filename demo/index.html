@@ -35,6 +35,13 @@
       <label for="topic">Tópico</label>
       <select id="topic"></select>
     </div>
+    <form class="control" id="create-topic">
+      <label for="new-topic">Crear tópico</label>
+      <div class="control__row">
+        <input id="new-topic" class="text" type="text" placeholder="envios" pattern="[a-z0-9][a-z0-9._\-]{0,99}" required>
+        <button class="toggle" type="submit">Crear</button>
+      </div>
+    </form>
     <div class="control">
       <label for="producer-rate">Productor <output id="producer-rate-value">8</output> msgs/s</label>
       <div class="control__row">
@@ -148,6 +155,7 @@
   </main>
 
   <script src="sim.js"></script>
+  <script src="live.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

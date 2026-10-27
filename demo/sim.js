@@ -91,6 +91,18 @@ class SimulatedCluster {
     return lines;
   }
 
+  async createTopic(name) {
+    await delay(5);
+    if (!this.writableLeader()) {
+      return { status: 503 };
+    }
+    if (this.topics.has(name)) {
+      return { status: 409 };
+    }
+    this.addTopic(name, 3, 5, 'API');
+    return { status: 201 };
+  }
+
   async publish(topic, value) {
     await delay(2);
     if (!this.topics.has(topic)) {

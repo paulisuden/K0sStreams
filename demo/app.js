@@ -1,7 +1,8 @@
 'use strict';
 
 // Consola de la demo: muestra en vivo lo que hace el cluster (Lease, épocas, réplicas, cola, logs) y permite generar
-// carga y provocar fallas. Habla con una "fuente" con la interfaz de SimulatedCluster (sim.js).
+// carga y provocar fallas. Habla con una "fuente": el cluster simulado (sim.js) o el real (live.js), con la misma
+// interfaz. Abierta como archivo usa el simulado; servida por nginx en el cluster, el real. ?mode=sim fuerza el simulado.
 //
 // El panel de la cola se arma con lo que hacen el productor y los consumidores de esta página: es lo que vería
 // cualquier cliente. Sirve igual con el cluster simulado y con el real, sin pedirle nada nuevo a la API.
@@ -46,10 +47,12 @@ const KEY_LOGS = [
   { pattern: /answers again/ },
 ];
 
-const source = new SimulatedCluster();
+const TOPIC_NAME = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+
+let source = null;
 
 const state = {
-  topic: 'pedidos',
+  topic: null,
   snapshot: null,
   hwHistory: new Map(),
   producer: { running: false, rate: 8, credit: 0, sequence: 5000 },
@@ -92,6 +95,7 @@ async function poll() {
     handleLogs(await source.logs());
     detectEvents(previous, state.snapshot);
     recordHistory(state.snapshot);
+    renderTopicOptions(state.snapshot);
     await refreshHistory();
     await refreshDeadLetters();
     render(previous);
@@ -183,6 +187,9 @@ function recordHistory(snapshot) {
 
 async function refreshHistory() {
   const topic = state.topic;
+  if (!topic) {
+    return;
+  }
   const leaderHw = topicHw(topic);
   if (state.history.next === null) {
     state.history.next = Math.max(0, leaderHw - 30);
@@ -200,6 +207,9 @@ async function refreshHistory() {
 
 async function refreshDeadLetters() {
   const flow = state.flow;
+  if (!state.topic) {
+    return;
+  }
   const result = await source.deadLetters(state.topic, QUEUE);
   if (result.status !== 200 || flow !== state.flow) {
     return;
@@ -214,7 +224,7 @@ async function refreshDeadLetters() {
 
 function producerTick() {
   const producer = state.producer;
-  if (!producer.running) {
+  if (!producer.running || !state.topic) {
     return;
   }
   producer.credit += producer.rate / 10;
@@ -254,6 +264,10 @@ function startConsumers() {
 async function consumeLoop(generation) {
   while (state.consumers.running && state.consumers.generation === generation) {
     const topic = state.topic;
+    if (!topic) {
+      await sleep(1000);
+      continue;
+    }
     const result = await source.receive(topic, QUEUE, VISIBILITY_SECONDS).catch(() => ({ status: 0 }));
     if (result.status === 200) {
       await handleDelivery(topic, result.delivery);
@@ -353,7 +367,7 @@ function renderCluster(snapshot) {
   document.getElementById('nodes').innerHTML = snapshot.brokers.map((broker) => {
     const [x, y] = NODE_POSITIONS[broker.name];
     const hw = broker.hw[state.topic];
-    const lag = leaderHw !== null && broker.role === 'follower' ? leaderHw - hw : 0;
+    const lag = leaderHw !== null && hw !== undefined && broker.role === 'follower' ? leaderHw - hw : 0;
     const status = broker.status === 'up' ? broker.role : broker.status;
     const label = {
       leader: `líder · época ${snapshot.epoch}`,
@@ -448,9 +462,9 @@ function renderTopics(snapshot) {
     const leaderHw = leader?.hw[topic.name];
     const replicas = snapshot.brokers.map((broker) => {
       const hw = broker.hw[topic.name];
-      const behind = leaderHw !== undefined && broker.role === 'follower' && hw < leaderHw;
+      const behind = leaderHw !== undefined && hw !== undefined && broker.role === 'follower' && hw < leaderHw;
       const kind = broker.status !== 'up' ? 'down' : broker.role === 'leader' ? 'leader' : behind ? 'behind' : '';
-      return `<div class="replica replica--${kind}"><b>${broker.name}${broker.role === 'leader' ? ' ♛' : ''}</b>${hw}${behind ? ` <em>−${leaderHw - hw}</em>` : ''}</div>`;
+      return `<div class="replica replica--${kind}"><b>${broker.name}${broker.role === 'leader' ? ' ♛' : ''}</b>${hw ?? '–'}${behind ? ` <em>−${leaderHw - hw}</em>` : ''}</div>`;
     }).join('');
     return `
       <article class="topic ${topic.name === state.topic ? 'is-selected' : ''}">
@@ -464,6 +478,19 @@ function renderTopics(snapshot) {
         <div class="replicas">${replicas}</div>
       </article>`;
   }).join('');
+}
+
+/** La lista cambia cuando aparece un Topic nuevo o se crea uno desde la página. Sin tópico elegido, toma el primero. */
+function renderTopicOptions(snapshot) {
+  const select = document.getElementById('topic');
+  const names = snapshot.topics.map((t) => t.name);
+  if (names.join() !== [...select.options].map((o) => o.value).join()) {
+    select.innerHTML = names.map((name) => `<option value="${name}">${name}</option>`).join('');
+  }
+  if (!state.topic && names.length > 0) {
+    selectTopic(names[0]);
+  }
+  select.value = state.topic ?? '';
 }
 
 function renderFaultButtons(snapshot) {
@@ -604,6 +631,25 @@ function bindControls() {
   const topicSelect = document.getElementById('topic');
   topicSelect.addEventListener('change', () => selectTopic(topicSelect.value));
 
+  const createForm = document.getElementById('create-topic');
+  createForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const input = document.getElementById('new-topic');
+    const name = input.value.trim();
+    if (!TOPIC_NAME.test(name)) {
+      return;
+    }
+    const result = await source.createTopic(name);
+    if (result.status === 201 || result.status === 409) {
+      addEvent('action', '＋', `Tópico ${name} ${result.status === 201 ? 'creado' : 'ya existía'}`, 'POST /v1/topics');
+      input.value = '';
+      await poll();
+      selectTopic(name);
+    } else {
+      addEvent('danger', '✖', `No se pudo crear ${name}`, describeStatus(result.status));
+    }
+  });
+
   const producerToggle = document.getElementById('producer-toggle');
   producerToggle.addEventListener('click', () => {
     state.producer.running = !state.producer.running;
@@ -680,16 +726,18 @@ function selectTopic(topic) {
   }
 }
 
+async function createSource() {
+  const requested = new URLSearchParams(location.search).get('mode');
+  const live = requested ? requested === 'live' : location.protocol !== 'file:';
+  return live ? LiveCluster.create() : new SimulatedCluster();
+}
+
 async function init() {
+  source = await createSource();
   const mode = document.getElementById('mode');
   mode.textContent = source.mode === 'live' ? 'en vivo' : 'simulado';
   mode.classList.toggle('mode--live', source.mode === 'live');
   setText('flow-queue', QUEUE);
-
-  const snapshot = await source.snapshot();
-  document.getElementById('topic').innerHTML = snapshot.topics
-    .map((t) => `<option value="${t.name}">${t.name}</option>`).join('');
-  selectTopic(snapshot.topics[0]?.name ?? 'pedidos');
   bindControls();
 
   setInterval(poll, POLL_MS);

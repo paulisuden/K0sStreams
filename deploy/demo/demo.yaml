@@ -1,0 +1,189 @@
+# Consola de la demo (demo/) en modo en vivo: un pod con nginx que sirve la página y hace de intermediario entre el
+# navegador y el cluster. Es opcional: está en una subcarpeta para que "kubectl apply -f deploy/" no la levante.
+#
+#   kubectl create configmap demo-web --from-file=demo/ --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl apply -f deploy/demo/
+#   kubectl rollout status deployment/demo
+#   kubectl port-forward svc/demo 8080:80              # y abrir http://localhost:8080
+#
+# Después de cambiar algo en demo/: el mismo "create configmap" y "kubectl rollout restart deployment/demo".
+# Tópicos creados por la API (la API no los lista): http://localhost:8080/?topics=chaos-1,chaos-2
+
+# Lo que el navegador pide y adónde lo manda nginx:
+#   /lb/...                 → Service broker-lb, como cualquier cliente. Un seguidor responde 307 a broker-N.broker,
+#                             un nombre que el navegador no resuelve: nginx reescribe el Location a /brokers/broker-N/...
+#   /brokers/broker-N/...   → ese broker por el Service headless, para leer el high watermark de cada uno
+#   /k8s/...                → el API server con el token de la ServiceAccount demo, solo en las rutas que usa la página
+#   /config.json            → el namespace, para armar las rutas de /k8s
+# El entrypoint de la imagen completa ${...} con las variables del pod (envsubst) antes de arrancar nginx.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-nginx
+  labels:
+    app: demo
+data:
+  default.conf.template: |
+    server {
+      listen 8080;
+      root /usr/share/nginx/html;
+      index index.html;
+
+      # Resolver por pedido y no una vez al arrancar: un broker que se reinicia vuelve con otra IP.
+      resolver ${NGINX_LOCAL_RESOLVERS} valid=2s ipv6=off;
+      proxy_connect_timeout 2s;
+      # Publicar espera el quórum, y durante un failover eso puede tardar hasta 15 s.
+      proxy_read_timeout 20s;
+
+      location = /config.json {
+        default_type application/json;
+        return 200 '{"namespace":"${POD_NAMESPACE}"}';
+      }
+
+      location ~ ^/lb/(.*)$ {
+        proxy_pass http://broker-lb.${POD_NAMESPACE}.svc.cluster.local:9090/$1$is_args$args;
+        proxy_redirect ~^http://(broker-[0-9]+)\.broker:9090/(.*)$ /brokers/$1/$2;
+      }
+
+      location ~ ^/brokers/(broker-[0-9]+)/(.*)$ {
+        proxy_pass http://$1.broker.${POD_NAMESPACE}.svc.cluster.local:9090/$2$is_args$args;
+        proxy_redirect ~^http://(broker-[0-9]+)\.broker:9090/(.*)$ /brokers/$1/$2;
+      }
+
+      # El Lease, los pods (listar, borrar uno, sus logs) y los Topic de la CRD. El Role de abajo limita lo mismo.
+      location ~ ^/k8s/(apis/coordination\.k8s\.io/v1/namespaces/[^/]+/leases/k0sstreams-leader|api/v1/namespaces/[^/]+/pods(/broker-[0-9]+(/log)?)?|apis/k0sstreams\.io/v1/namespaces/[^/]+/topics)$ {
+        proxy_set_header Authorization "Bearer ${K8S_TOKEN}";
+        proxy_pass https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}/$1$is_args$args;
+        proxy_ssl_trusted_certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt;
+        proxy_ssl_verify on;
+        proxy_ssl_server_name on;
+        proxy_ssl_name kubernetes.default.svc;
+      }
+    }
+  # Corre antes del envsubst (los .envsh se cargan en el mismo shell): deja el token en una variable para el template.
+  # El token que monta Kubernetes vence, pero mucho después de lo que dura una presentación.
+  16-k8s-token.envsh: |
+    #!/bin/sh
+    K8S_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+    export K8S_TOKEN
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo
+  labels:
+    app: demo
+---
+# Solo lo que usa la página. Borrar pods queda limitado a los tres brokers, para el botón de "matar".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: demo
+  labels:
+    app: demo
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [k0sstreams-leader]
+    verbs: [get]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: ['']
+    resources: [pods/log]
+    resourceNames: [broker-0, broker-1, broker-2]
+    verbs: [get]
+  - apiGroups: ['']
+    resources: [pods]
+    resourceNames: [broker-0, broker-1, broker-2]
+    verbs: [delete]
+  - apiGroups: [k0sstreams.io]
+    resources: [topics]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo
+  labels:
+    app: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: demo
+subjects:
+  - kind: ServiceAccount
+    name: demo
+    # Como en rbac.yaml: si se despliega en otro namespace, cambiarlo acá.
+    namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo
+  labels:
+    app: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo
+  template:
+    metadata:
+      labels:
+        app: demo
+    spec:
+      serviceAccountName: demo
+      containers:
+        - name: web
+          # La variante sin root de la imagen oficial: escucha en 8080 y corre como uid 101.
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Que el entrypoint lea el DNS del pod de /etc/resolv.conf y lo deje en NGINX_LOCAL_RESOLVERS.
+            - name: NGINX_ENTRYPOINT_LOCAL_RESOLVERS
+              value: '1'
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /config.json
+              port: http
+          volumeMounts:
+            - name: web
+              mountPath: /usr/share/nginx/html
+            - name: nginx
+              mountPath: /etc/nginx/templates/default.conf.template
+              subPath: default.conf.template
+            - name: nginx
+              mountPath: /docker-entrypoint.d/16-k8s-token.envsh
+              subPath: 16-k8s-token.envsh
+      volumes:
+        # Los archivos de demo/, cargados con "kubectl create configmap demo-web --from-file=demo/".
+        - name: web
+          configMap:
+            name: demo-web
+        - name: nginx
+          configMap:
+            name: demo-nginx
+            # El entrypoint solo ejecuta los scripts que tienen permiso de ejecución.
+            defaultMode: 0755
+---
+# Sin IP externa: se entra con "kubectl port-forward", así el botón de matar brokers no queda expuesto.
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo
+  labels:
+    app: demo
+spec:
+  selector:
+    app: demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
