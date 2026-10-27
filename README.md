@@ -120,6 +120,7 @@ K0sStreams/
 ├─ deploy/                      manifiestos de Kubernetes (StatefulSet, Service, RBAC, CRD)
 ├─ chaos/                       pruebas de caos y verificador de pérdida de mensajes
 ├─ bench/                       benchmark con k6
+├─ demo/                        consola de la demo: el cluster en vivo o simulado
 └─ docs/                        arquitectura, análisis y diagramas
 ```
 
@@ -189,7 +190,7 @@ Si hay atraso se recorta, en este orden: CRD Topic, Server-Sent Events, varias p
 | A — Almacenamiento | Log en disco, índice, CRC32, group commit, recuperación | `Storage` |
 | B — Cola y API | Motor de cola y API HTTP + Swagger | `Queue`, `Broker` |
 | C — Replicación | gRPC, quórum 2 de 3, high watermark, puesta al día de seguidores | `Replication` |
-| D — Plataforma y coordinación | CI, Docker, Kubernetes, Lease, épocas, fencing, CRD, caos, benchmark | `Coordination`, `deploy/`, `chaos/`, `bench/`, `.github/` |
+| D — Plataforma y coordinación | CI, Docker, Kubernetes, Lease, épocas, fencing, CRD, caos, benchmark, demo | `Coordination`, `deploy/`, `chaos/`, `bench/`, `demo/`, `.github/` |
 
 ## Cómo contribuir
 
@@ -202,6 +203,6 @@ Si hay atraso se recorta, en este orden: CRD Topic, Server-Sent Events, varias p
 ## Documentación
 
 - [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md): documento técnico completo (flujos, interfaces C#, formato en disco, servicio gRPC).
-- [docs/chaos.md](docs/chaos.md), [docs/benchmark.md](docs/benchmark.md) y [docs/topic-crd.md](docs/topic-crd.md): suite de caos, benchmark y CRD Topic.
+- [docs/chaos.md](docs/chaos.md), [docs/benchmark.md](docs/benchmark.md), [docs/topic-crd.md](docs/topic-crd.md) y [docs/demo.md](docs/demo.md): suite de caos, benchmark, CRD Topic y consola de la demo.
 - [Documento técnico en línea](https://claude.ai/artifact/Wfp6im7Nn4MuKNvBEVtbDu): la misma arquitectura, con diagramas renderizados.
 - [docs/K0sStreams_Analisis_y_Plan(1).docx.pdf](<docs/K0sStreams_Analisis_y_Plan(1).docx.pdf>): análisis inicial y estimación de horas.

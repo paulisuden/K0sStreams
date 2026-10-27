@@ -38,7 +38,7 @@ docker compose up --build -d                  # 3 brokers locales, broker-0 líd
 | A — Almacenamiento | `src/K0sStreams.Storage/`, `tests/K0sStreams.Storage.Tests/` | `feature/almacenamiento` |
 | B — Cola y API | `src/K0sStreams.Queue/`, `src/K0sStreams.Broker/Api/`, `tests/K0sStreams.Queue.Tests/`, `tests/K0sStreams.Broker.Tests/` | `feature/cola-api` |
 | C — Replicación | `src/K0sStreams.Replication/`, `tests/K0sStreams.Replication.Tests/` | `feature/replicacion` |
-| D — Plataforma y coordinación | `src/K0sStreams.Coordination/`, `tests/K0sStreams.Coordination.Tests/`, `deploy/`, `chaos/`, `bench/`, `.github/`, `Dockerfile`, `.dockerignore`, `compose.yaml`, `CLAUDE.md` | `feature/plataforma-y-cordinacion` |
+| D — Plataforma y coordinación | `src/K0sStreams.Coordination/`, `tests/K0sStreams.Coordination.Tests/`, `deploy/`, `chaos/`, `bench/`, `demo/`, `.github/`, `Dockerfile`, `.dockerignore`, `compose.yaml`, `CLAUDE.md` | `feature/plataforma-y-cordinacion` |
 
 Archivos **compartidos**: no se tocan sin avisar antes en el grupo, y van en un PR propio, nunca mezclados con trabajo del bloque.
 
