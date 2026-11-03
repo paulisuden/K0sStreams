@@ -15,6 +15,7 @@ internal sealed class TestNode : IDisposable
         Log = log ?? new InMemoryLog();
         Cluster = new ControllableClusterState(nodeId, isLeader, epoch);
         Epochs = new EpochTracker(Cluster);
+        Catalog = new InMemoryTopicCatalog();
         AppendHandler = new AppendHandler(Log, Epochs, Cluster, KnownTopics, NullLogger<AppendHandler>.Instance);
         Node = new ReplicationNode(Log, Cluster, Epochs, AppendHandler, KnownTopics, Options.Create(options ?? new ReplicationOptions()));
     }
@@ -24,6 +25,8 @@ internal sealed class TestNode : IDisposable
     public ControllableClusterState Cluster { get; }
 
     public EpochTracker Epochs { get; }
+
+    public ITopicCatalog Catalog { get; }
 
     public KnownTopics KnownTopics { get; } = new();
 

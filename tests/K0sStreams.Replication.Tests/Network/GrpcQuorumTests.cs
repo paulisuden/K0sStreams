@@ -26,15 +26,15 @@ public class GrpcQuorumTests
             ["Replication:MaxRetryBackoff"] = "00:00:00.200",
         });
 
-        long first = await leader.Log.AppendAsync(Topic, Message(Record.Unassigned, 1, "first"));
+        long first = await leader.Log.AppendAsync(Topic, 0, Message(Record.Unassigned, 1, "first"));
         await leader.Replicator.WaitForQuorumAsync(Topic, 0, first).AsTask().WaitAsync(Patience);
 
         await follower2.DisposeAsync();
-        long second = await leader.Log.AppendAsync(Topic, Message(Record.Unassigned, 1, "second"));
+        long second = await leader.Log.AppendAsync(Topic, 0, Message(Record.Unassigned, 1, "second"));
         await leader.Replicator.WaitForQuorumAsync(Topic, 0, second).AsTask().WaitAsync(Patience);
 
         await using var restarted = await ReplicationTestServer.StartAsync("broker-2", port: follower2Port);
-        await Eventually.UntilAsync(() => restarted.Log.EndOffset(Topic) == second, "the restarted follower to catch up");
+        await Eventually.UntilAsync(() => restarted.Log.EndOffset(Topic, 0) == second, "the restarted follower to catch up");
         (await EncodedAsync(restarted.Log)).Should().Equal(await EncodedAsync(leader.Log));
     }
 }

@@ -39,7 +39,7 @@ public sealed class SparseIndexTests : IDisposable
 
     private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "k0sstreams-tests", Guid.NewGuid().ToString("N"));
 
-    private string Carpeta => Path.Combine(_dataDir, Topico);
+    private string Carpeta => Path.Combine(_dataDir, Topico, "partition-0");
 
     private string Log => Path.Combine(Carpeta, "00000000000000000000.log");
 

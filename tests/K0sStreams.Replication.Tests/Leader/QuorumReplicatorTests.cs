@@ -24,8 +24,8 @@ public class QuorumReplicatorTests
 
         await cluster.ConfirmAsync(offset);
 
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(offset);
-        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic) == offset), "both followers to have the record");
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(offset);
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic, 0) == offset), "both followers to have the record");
         foreach (var follower in cluster.Followers)
         {
             (await EncodedAsync(follower.Log)).Should().Equal(await EncodedAsync(cluster.Leader.Log));
@@ -41,8 +41,8 @@ public class QuorumReplicatorTests
 
         await cluster.ConfirmAsync(offset);
 
-        cluster.Followers[0].Log.EndOffset(Topic).Should().Be(-1);
-        cluster.Followers[1].Log.EndOffset(Topic).Should().Be(offset);
+        cluster.Followers[0].Log.EndOffset(Topic, 0).Should().Be(-1);
+        cluster.Followers[1].Log.EndOffset(Topic, 0).Should().Be(offset);
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public class QuorumReplicatorTests
 
         await cluster.ConfirmAsync(offset);
 
-        cluster.Followers[0].Log.EndOffset(Topic).Should().Be(-1);
+        cluster.Followers[0].Log.EndOffset(Topic, 0).Should().Be(-1);
     }
 
     [Fact]
@@ -70,7 +70,7 @@ public class QuorumReplicatorTests
         await cluster.Time.AdvanceSlowlyAsync(TimeSpan.FromSeconds(10));
 
         wait.IsCompleted.Should().BeFalse();
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(-1);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(-1);
         await cts.CancelAsync();
         await FluentActions.Awaiting(() => wait).Should().ThrowAsync<OperationCanceledException>();
     }
@@ -145,7 +145,7 @@ public class QuorumReplicatorTests
 
         await cluster.EventuallyAsync(() => all.IsCompleted, "every write to be confirmed");
         await all;
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(199);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(199);
     }
 
     [Fact]
@@ -166,7 +166,7 @@ public class QuorumReplicatorTests
 
         await cluster.ConfirmAsync(offset);
 
-        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.HighWatermark(Topic) == offset), "followers to learn the HW");
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.HighWatermark(Topic, 0) == offset), "followers to learn the HW");
     }
 
     [Fact]
@@ -178,7 +178,7 @@ public class QuorumReplicatorTests
 
         cluster.RestartFollower(0);
 
-        await cluster.EventuallyAsync(() => cluster.Followers[0].Log.EndOffset(Topic) == offset, "the restarted follower to catch up");
+        await cluster.EventuallyAsync(() => cluster.Followers[0].Log.EndOffset(Topic, 0) == offset, "the restarted follower to catch up");
     }
 
     [Fact]
@@ -187,16 +187,16 @@ public class QuorumReplicatorTests
         await using var cluster = new ReplicationCluster(leaderEpoch: 2);
         await SeedAsync(cluster.Leader.Log, 1, 1); // left by the previous leader, never confirmed
         var oldRecord = cluster.WaitAsync(1);
-        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic) == 1), "followers to copy the old records");
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic, 0) == 1), "followers to copy the old records");
         await cluster.Time.AdvanceSlowlyAsync(TimeSpan.FromSeconds(1));
         oldRecord.IsCompleted.Should().BeFalse();
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(-1);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(-1);
 
         long offset = await cluster.WriteAsync();
         await cluster.ConfirmAsync(offset);
 
         await oldRecord;
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(offset);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(offset);
     }
 
     [Fact]
@@ -267,7 +267,7 @@ public class QuorumReplicatorTests
         long offset = await cluster.WriteAsync();
 
         cluster.Replicator.WaitForQuorumAsync(Topic, 0, offset).AsTask().IsCompletedSuccessfully.Should().BeTrue();
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(offset);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(offset);
     }
 
     [Fact]

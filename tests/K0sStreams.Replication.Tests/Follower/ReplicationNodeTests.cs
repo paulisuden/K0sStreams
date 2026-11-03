@@ -59,7 +59,7 @@ public sealed class ReplicationNodeTests : IDisposable
     public async Task Fetch_does_not_stop_at_the_high_watermark_and_reports_it()
     {
         await SeedAsync(_broker.Log, 1, 1, 1);
-        _broker.Log.AdvanceHighWatermark(Topic, 0);
+        _broker.Log.AdvanceHighWatermark(Topic, 0, 0);
 
         var batches = await FetchAsync(_broker, from: 0);
 
@@ -78,7 +78,6 @@ public sealed class ReplicationNodeTests : IDisposable
     [Theory]
     [InlineData("../etc", 0, 0)]
     [InlineData("orders", -1, 0)]
-    [InlineData("orders", 1, 0)]
     [InlineData("orders", 0, -1)]
     public async Task Invalid_fetch_fails_with_invalid_argument(string topic, int partition, long from)
     {
@@ -108,10 +107,10 @@ public sealed class ReplicationNodeTests : IDisposable
     public async Task GetState_reports_epoch_offsets_and_role()
     {
         await SeedAsync(_broker.Log, 1, 1, 1);
-        _broker.Log.AdvanceHighWatermark(Topic, 1);
+        _broker.Log.AdvanceHighWatermark(Topic, 0, 1);
         _broker.Cluster.ChangeEpoch(2, leader: true);
 
-        var state = await _broker.Node.GetStateAsync(new StateRequest { Topic = Topic });
+        var state = await _broker.Node.GetStateAsync(new StateRequest { Topic = Topic, Partition = 0 });
 
         state.Should().Be(new StateResponse { Epoch = 2, EndOffset = 2, HighWatermark = 1, NodeId = "broker-0", IsLeader = true });
     }
@@ -119,7 +118,7 @@ public sealed class ReplicationNodeTests : IDisposable
     [Fact]
     public async Task GetState_of_an_untouched_topic_reports_an_empty_log()
     {
-        var state = await _broker.Node.GetStateAsync(new StateRequest { Topic = "payments" });
+        var state = await _broker.Node.GetStateAsync(new StateRequest { Topic = "payments", Partition = 0 });
 
         state.EndOffset.Should().Be(-1);
         state.HighWatermark.Should().Be(-1);
@@ -128,13 +127,13 @@ public sealed class ReplicationNodeTests : IDisposable
     [Fact]
     public async Task Invalid_GetState_fails_with_invalid_argument()
     {
-        var act = () => _broker.Node.GetStateAsync(new StateRequest { Topic = "../etc" });
+        var act = () => _broker.Node.GetStateAsync(new StateRequest { Topic = "../etc", Partition = 0 });
 
         (await act.Should().ThrowAsync<RpcException>()).Which.StatusCode.Should().Be(StatusCode.InvalidArgument);
     }
 
     private static async Task<List<RecordBatch>> FetchAsync(TestNode broker, long from, int max = 0, long epoch = 1) =>
-        await broker.Node.FetchAsync(new FetchRequest { Epoch = epoch, Topic = Topic, FromOffset = from, MaxRecords = max }).ToListAsync();
+        await broker.Node.FetchAsync(new FetchRequest { Epoch = epoch, Topic = Topic, Partition = 0, FromOffset = from, MaxRecords = max }).ToListAsync();
 
     private static List<long> Offsets(IEnumerable<RecordBatch> batches) =>
         [.. batches.SelectMany(batch => batch.Records).Select(Decode).Select(record => record.Offset)];

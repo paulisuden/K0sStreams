@@ -4,6 +4,7 @@ using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Leader;
 using K0sStreams.Replication.Network;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using static K0sStreams.Replication.Tests.Support.TestRecords;
 using Record = K0sStreams.Contracts.Record;
@@ -59,7 +60,7 @@ internal sealed class ReplicationCluster : IAsyncDisposable
     /// <summary>Appends a message to the leader's log, stamped with the leader's epoch, as B's API will.</summary>
     public async Task<long> WriteAsync(string value = "v") =>
         await Leader.Log.AppendAsync(
-            Topic, Record.NewMessage(Leader.Cluster.CurrentEpoch, 0, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value)));
+            Topic, 0, Record.NewMessage(Leader.Cluster.CurrentEpoch, 0, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value)));
 
     public Task WaitAsync(long offset, CancellationToken ct = default) =>
         Replicator.WaitForQuorumAsync(Topic, 0, offset, ct).AsTask();

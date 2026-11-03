@@ -17,7 +17,9 @@ public sealed class EpochChangeWriterTests : IDisposable
     public EpochChangeWriterTests()
     {
         _broker.Epochs.Observe(2);
-        _writer = new EpochChangeWriter(_broker.Log, _broker.Node, _broker.Cluster, new FakeTimeProvider());
+        // Create topic in catalog so EpochChangeWriter can find it
+        _broker.Catalog.CreateAsync(new TopicConfig(Topic, 1, 3, TimeSpan.FromSeconds(5)), CancellationToken.None).AsTask().Wait();
+        _writer = new EpochChangeWriter(_broker.Log, _broker.Node, _broker.Cluster, _broker.Catalog, new FakeTimeProvider());
     }
 
     public void Dispose() => _broker.Dispose();
@@ -29,7 +31,7 @@ public sealed class EpochChangeWriterTests : IDisposable
 
         await _writer.WriteAsync(Topic, 2, CancellationToken.None);
 
-        var mark = await _broker.Log.ReadAsync(Topic, 2, 1).SingleAsync();
+        var mark = await _broker.Log.ReadAsync(Topic, 0, 2, 1).SingleAsync();
         mark.Type.Should().Be(RecordType.EpochChange);
         mark.Epoch.Should().Be(2);
         Encoding.UTF8.GetString(mark.Value.Span).Should().Be("broker-2");

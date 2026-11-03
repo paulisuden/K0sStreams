@@ -55,6 +55,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(sp => new PeerSurvey(
             sp.GetRequiredService<ReplicationNode>(),
             sp.GetRequiredService<IClusterState>(),
+            sp.GetRequiredService<ITopicCatalog>(),
             sp.GetRequiredService<PeerDirectory>().Peers,
             sp.GetRequiredService<MajorityCall>(),
             sp.GetRequiredService<EpochTracker>()));

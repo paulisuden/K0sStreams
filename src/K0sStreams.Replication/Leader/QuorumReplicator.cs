@@ -9,7 +9,7 @@ namespace K0sStreams.Replication.Leader;
 /// <summary>
 /// Leader side of replication (docs/replication.md, sections 5.1 to 5.5). <see cref="WaitForQuorumAsync"/> completes once
 /// a majority of brokers have the record on disk and the high watermark covers it. Followers are fed by one
-/// <see cref="PeerReplicator"/> per follower and topic, started on the topic's first write of each leadership term.
+/// <see cref="PeerReplicator"/> per follower and topic+partition, started on the topic's first write of each leadership term.
 /// With no peers configured, a write is confirmed by this broker alone.
 /// </summary>
 internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyncDisposable
@@ -62,13 +62,13 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
 
     public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default)
     {
-        if (!SingleLog.IsValid(topic, partition))
+        if (!TopicConfig.IsValidName(topic) || partition < 0)
         {
-            throw new ArgumentException($"Invalid topic '{topic}', or partition {partition}: every topic is a single log, partition {SingleLog.Partition}.");
+            throw new ArgumentException($"Invalid topic '{topic}' or partition {partition}.");
         }
 
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, Log.EndOffset(topic));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(offset, Log.EndOffset(topic, partition));
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed), this);
         if (ct.IsCancellationRequested)
         {
@@ -86,16 +86,16 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
 
         if (_peers.Length == 0)
         {
-            Log.AdvanceHighWatermark(topic, offset);
+            Log.AdvanceHighWatermark(topic, partition, offset);
             return ValueTask.CompletedTask;
         }
 
-        if (offset <= Log.HighWatermark(topic))
+        if (offset <= Log.HighWatermark(topic, partition))
         {
             return ValueTask.CompletedTask;
         }
 
-        var replication = GetOrStartTopic(term, topic, offset);
+        var replication = GetOrStartTopic(term, topic, partition, offset);
         return replication is null
             ? ValueTask.FromException(new NotLeaderException("This broker stopped leading before the write was confirmed."))
             : new ValueTask(replication.WaitAsync(offset, ct));
@@ -213,10 +213,11 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         }
     }
 
-    /// <summary>The topic's replication state in <paramref name="term"/>, created with its loops on first use. Null if the term stopped.</summary>
-    private TopicReplication? GetOrStartTopic(LeaderTerm term, string topic, long offset)
+    /// <summary>The topic+partition's replication state in <paramref name="term"/>, created with its loops on first use. Null if the term stopped.</summary>
+    private TopicReplication? GetOrStartTopic(LeaderTerm term, string topic, int partition, long offset)
     {
-        if (term.Topics.TryGetValue(topic, out var existing))
+        var key = (topic, partition);
+        if (term.Topics.TryGetValue(key, out var existing))
         {
             return existing;
         }
@@ -228,14 +229,14 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
                 return null;
             }
 
-            if (term.Topics.TryGetValue(topic, out existing))
+            if (term.Topics.TryGetValue(key, out existing))
             {
                 return existing;
             }
 
-            var replication = new TopicReplication(Log, topic, term.Epoch, _peers.Length);
-            term.Topics[topic] = replication;
-            long initialNext = Math.Min(offset, Log.EndOffset(topic) + 1);
+            var replication = new TopicReplication(Log, topic, partition, term.Epoch, _peers.Length);
+            term.Topics[key] = replication;
+            long initialNext = Math.Min(offset, Log.EndOffset(topic, partition) + 1);
             for (int i = 0; i < _peers.Length; i++)
             {
                 var loop = new PeerReplicator(this, term, replication, i, _peers[i].Key, _peers[i].Value, initialNext);
@@ -261,9 +262,9 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
 
         foreach (string topic in _knownTopics.Snapshot())
         {
-            if (Log.EndOffset(topic) >= 0)
+            if (Log.EndOffset(topic, 0) >= 0)
             {
-                GetOrStartTopic(term, topic, Log.HighWatermark(topic) + 1);
+                GetOrStartTopic(term, topic, 0, Log.HighWatermark(topic, 0) + 1);
             }
         }
     }

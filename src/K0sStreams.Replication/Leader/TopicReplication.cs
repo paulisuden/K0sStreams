@@ -4,7 +4,7 @@ using K0sStreams.Replication.Common;
 namespace K0sStreams.Replication.Leader;
 
 /// <summary>
-/// Leader-side state of one topic during one <see cref="LeaderTerm"/>: how far each follower is known to match the
+/// Leader-side state of one topic+partition during one <see cref="LeaderTerm"/>: how far each follower is known to match the
 /// leader, the high watermark, and the writes waiting to be confirmed. Everything is guarded by one lock, and that lock
 /// is never held while awaiting.
 /// </summary>
@@ -23,11 +23,13 @@ internal sealed class TopicReplication
     private long _highWatermark;
     private bool _stopped;
 
-    public TopicReplication(ILog log, string topic, long epoch, int peers)
+    public TopicReplication(ILog log, string topic, int partition, long epoch, int peers)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(peers, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(partition);
         _log = log;
         Topic = topic;
+        Partition = partition;
         Epoch = epoch;
         _needed = (peers + 1) / 2;
         _match = new long[peers];
@@ -39,10 +41,12 @@ internal sealed class TopicReplication
             _signals[i] = new AsyncSignal();
         }
 
-        _highWatermark = log.HighWatermark(topic);
+        _highWatermark = log.HighWatermark(topic, partition);
     }
 
     public string Topic { get; }
+
+    public int Partition { get; }
 
     public long Epoch { get; }
 
@@ -108,7 +112,7 @@ internal sealed class TopicReplication
             // confirmed with it. Epochs never go down along the log, so checking the candidate is enough.
             if (candidate > _highWatermark && IsCurrentEpochAt(candidate))
             {
-                _log.AdvanceHighWatermark(Topic, candidate);
+                _log.AdvanceHighWatermark(Topic, Partition, candidate);
                 Volatile.Write(ref _highWatermark, candidate);
                 advanced = true;
                 while (_waiters.TryPeek(out var waiter, out long offset) && offset <= candidate)

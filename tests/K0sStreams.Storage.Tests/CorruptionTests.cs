@@ -31,7 +31,7 @@ public sealed class CorruptionTests : IDisposable
     private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "k0sstreams-tests", Guid.NewGuid().ToString("N"));
     private readonly CapturingLogger _logger = new();
 
-    private string Carpeta => Path.Combine(_dataDir, Topico);
+    private string Carpeta => Path.Combine(_dataDir, Topico, "partition-0");
 
     private SegmentedLog Reiniciar(long limite = SegmentedLog.DefaultSegmentBytes) =>
         new(_dataDir, limite, _logger);

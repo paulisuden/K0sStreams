@@ -10,7 +10,7 @@ namespace K0sStreams.Storage;
 
 /// <summary>
 /// Log append-only en disco. Reemplaza a <c>InMemoryLog</c>.
-/// Cada tópico vive en <c>{DataDir}/{topic}/</c>, partido en <see cref="Segment"/> de tamaño
+/// Cada tópico vive en <c>{DataDir}/{topic}/partition-{partition}/</c>, partido en <see cref="Segment"/> de tamaño
 /// acotado, cada uno con su <see cref="SparseIndex"/>, más un archivo <c>checkpoint</c> con el
 /// high watermark.
 /// </summary>
@@ -29,16 +29,10 @@ public sealed partial class SegmentedLog : ILog
     /// </summary>
     public const long MaxSegmentBytes = int.MaxValue - RecordCodec.MaxRecordSize;
 
-    /// <summary>
-    /// un tópico es un único log, sin particiones. <see cref="ILog"/> todavía lleva el
-    /// parámetro, así que se fija acá en un solo lugar; cuando el contrato lo pierda, se borra esto.
-    /// </summary>
-    private const int SingleLogPartition = 0;
-
-    /// <summary>Archivo con el high watermark del tópico, al lado de los segmentos.</summary>
+    /// <summary>Archivo con el high watermark de la partición, al lado de los segmentos.</summary>
     private const string CheckpointFileName = "checkpoint";
 
-    private readonly ConcurrentDictionary<string, TopicLog> _topics = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<(string Topic, int Partition), TopicLog> _topics = new();
     private readonly long _segmentBytes;
     private readonly ILogger<SegmentedLog> _logger;
 
@@ -145,7 +139,7 @@ public sealed partial class SegmentedLog : ILog
             stream.Seek(tramo.Start, SeekOrigin.Begin);
 
             // Dentro de un segmento los registros están pegados uno al otro, así que desde la posición
-            // del primero alcanza con leerlos en orden. Cada uno arranca con su propio largo.
+            // del primero alcanzan con leerlos en orden. Cada uno arranca con su propio largo.
             var header = new byte[sizeof(int)];
 
             // El índice es disperso: deja parado en un registro anterior al pedido. Los que sobran
@@ -392,7 +386,7 @@ public sealed partial class SegmentedLog : ILog
         string contents = File.ReadAllText(log.CheckpointFile);
         if (!long.TryParse(contents, NumberStyles.Integer, CultureInfo.InvariantCulture, out long saved))
         {
-            LogUnreadableCheckpoint(_logger, log.Topic, contents);
+            LogUnreadableCheckpoint(_logger, log.Topic, log.Partition, contents);
             return Record.Unassigned;
         }
 
@@ -401,7 +395,7 @@ public sealed partial class SegmentedLog : ILog
         long usable = Math.Clamp(saved, Record.Unassigned, endOffset);
         if (usable != saved)
         {
-            LogClampedCheckpoint(_logger, log.Topic, saved, usable);
+            LogClampedCheckpoint(_logger, log.Topic, log.Partition, saved, usable);
         }
 
         return usable;
@@ -427,10 +421,9 @@ public sealed partial class SegmentedLog : ILog
             throw new ArgumentException($"Nombre de tópico inválido: '{topic}'.", nameof(topic));
         }
 
-        // no hay particiones. Se rechaza cualquier otra en lugar de ignorarla en silencio.
-        ArgumentOutOfRangeException.ThrowIfNotEqual(partition, SingleLogPartition);
+        ArgumentOutOfRangeException.ThrowIfNegative(partition);
 
-        var log = _topics.GetOrAdd(topic, name => new TopicLog(DataDir, name));
+        var log = _topics.GetOrAdd((topic, partition), key => new TopicLog(DataDir, key.Topic, key.Partition));
         lock (log.Gate)
         {
             if (!log.Recovered)
@@ -443,7 +436,7 @@ public sealed partial class SegmentedLog : ILog
                 {
                     // Un solo lugar para todas las formas de daño: el mensaje de la excepción ya trae
                     // el archivo, el byte y el motivo. Se loguea y se relanza, no se esconde.
-                    LogUnrecoverable(_logger, ex, topic);
+                    LogUnrecoverable(_logger, ex, log.Topic, log.Partition);
                     throw;
                 }
 
@@ -456,7 +449,7 @@ public sealed partial class SegmentedLog : ILog
 
     /// <summary>
     /// Reconstruye el índice en memoria leyendo todos los segmentos en orden. Corre una sola vez por
-    /// tópico, la primera vez que alguien lo usa; hacerlo al arrancar el proceso lo demoraría y las
+    /// partición, la primera vez que alguien la usa; hacerlo al arrancar el proceso lo demoraría y las
     /// sondas de Kubernetes matan un pod que tarda.
     /// </summary>
     private void RebuildIndex(TopicLog log)
@@ -485,7 +478,7 @@ public sealed partial class SegmentedLog : ILog
 
         if (log.Segments.Count > 0)
         {
-            LogRecovered(_logger, log.Topic, log.NextOffset, log.Segments.Count, log.NextOffset - 1, log.HighWatermark);
+            LogRecovered(_logger, log.Topic, log.Partition, log.NextOffset, log.Segments.Count, log.NextOffset - 1, log.HighWatermark);
         }
     }
 
@@ -503,7 +496,7 @@ public sealed partial class SegmentedLog : ILog
             {
                 // Se ignora, pero avisando: un archivo así en la carpeta de datos es algo que nadie
                 // puso a propósito, y descubrirlo en silencio es peor que descubrirlo tarde.
-                LogIgnoredFile(_logger, Path.GetFileName(path), log.Topic);
+                LogIgnoredFile(_logger, Path.GetFileName(path), log.Topic, log.Partition);
             }
         }
 
@@ -535,7 +528,7 @@ public sealed partial class SegmentedLog : ILog
         }
 
         // El proceso murió escribiendo. Se descarta sin culpa: ese AppendAsync nunca devolvió un offset.
-        LogIncompleteWrite(_logger, Path.GetFileName(segment.FilePath), log.Topic, total, valid);
+        LogIncompleteWrite(_logger, Path.GetFileName(segment.FilePath), log.Topic, log.Partition, total, valid);
         Cut(segment.FilePath, valid);
 
         // Y el recorte puede haber dejado un ancla apuntando a un registro que ya no está.
@@ -576,7 +569,7 @@ public sealed partial class SegmentedLog : ILog
         // nunca llegó a los 4 KB, y avisar de eso en cada arranque sería ruido.
         if (hadIndex)
         {
-            LogRebuildingIndex(_logger, Path.GetFileName(segment.FilePath), log.Topic);
+            LogRebuildingIndex(_logger, Path.GetFileName(segment.FilePath), log.Topic, log.Partition);
         }
 
         segment.Index.Discard();
@@ -638,57 +631,61 @@ public sealed partial class SegmentedLog : ILog
 
     [LoggerMessage(
         Level = LogLevel.Information,
-        Message = "Recovered {Topic} from disk: {Records} records in {Segments} segments, end offset {EndOffset}, high watermark {HighWatermark}.")]
+        Message = "Recovered {Topic} partition {Partition} from disk: {Records} records in {Segments} segments, end offset {EndOffset}, high watermark {HighWatermark}.")]
     private static partial void LogRecovered(
-        ILogger logger, string topic, long records, int segments, long endOffset, long highWatermark);
+        ILogger logger, string topic, int partition, long records, int segments, long endOffset, long highWatermark);
 
     [LoggerMessage(
         Level = LogLevel.Warning,
-        Message = "Discarded an incomplete write at the end of {File} in {Topic}: truncated from {Length} to {ValidLength} bytes. The append that wrote it never returned an offset.")]
+        Message = "Discarded an incomplete write at the end of {File} in {Topic} partition {Partition}: truncated from {Length} to {ValidLength} bytes. The append that wrote it never returned an offset.")]
     private static partial void LogIncompleteWrite(
-        ILogger logger, string file, string topic, long length, long validLength);
+        ILogger logger, string file, string topic, int partition, long length, long validLength);
 
     [LoggerMessage(
         Level = LogLevel.Warning,
-        Message = "Rebuilding the index of {File} in {Topic}: the .index file does not describe the segment. Nothing is lost, but recovery had to read the whole segment.")]
-    private static partial void LogRebuildingIndex(ILogger logger, string file, string topic);
+        Message = "Rebuilding the index of {File} in {Topic} partition {Partition}: the .index file does not describe the segment. Nothing is lost, but recovery had to read the whole segment.")]
+    private static partial void LogRebuildingIndex(ILogger logger, string file, string topic, int partition);
 
     [LoggerMessage(
         Level = LogLevel.Warning,
-        Message = "Ignored the checkpoint of {Topic}: '{Contents}' is not a number. Starting with no confirmed records until replication raises the high watermark again.")]
-    private static partial void LogUnreadableCheckpoint(ILogger logger, string topic, string contents);
+        Message = "Ignored the checkpoint of {Topic} partition {Partition}: '{Contents}' is not a number. Starting with no confirmed records until replication raises the high watermark again.")]
+    private static partial void LogUnreadableCheckpoint(ILogger logger, string topic, int partition, string contents);
 
     [LoggerMessage(
         Level = LogLevel.Warning,
-        Message = "Clamped the checkpoint of {Topic} from {Saved} to {Usable}: the log cannot back that high watermark.")]
-    private static partial void LogClampedCheckpoint(ILogger logger, string topic, long saved, long usable);
+        Message = "Clamped the checkpoint of {Topic} partition {Partition} from {Saved} to {Usable}: the log cannot back that high watermark.")]
+    private static partial void LogClampedCheckpoint(ILogger logger, string topic, int partition, long saved, long usable);
 
     [LoggerMessage(
         Level = LogLevel.Warning,
-        Message = "Ignored {File} in the data directory of {Topic}: its name is not a segment base offset.")]
-    private static partial void LogIgnoredFile(ILogger logger, string file, string topic);
+        Message = "Ignored {File} in the data directory of {Topic} partition {Partition}: its name is not a segment base offset.")]
+    private static partial void LogIgnoredFile(ILogger logger, string file, string topic, int partition);
 
     [LoggerMessage(
         Level = LogLevel.Critical,
-        Message = "Cannot recover {Topic} from disk. Refusing to serve the topic instead of dropping records: a gap in the middle of a log is not something another broker can restore.")]
-    private static partial void LogUnrecoverable(ILogger logger, Exception exception, string topic);
+        Message = "Cannot recover {Topic} partition {Partition} from disk. Refusing to serve the partition instead of dropping records: a gap in the middle of a log is not something another broker can restore.")]
+    private static partial void LogUnrecoverable(ILogger logger, Exception exception, string topic, int partition);
 
-    /// <summary>Estado de un tópico: sus segmentos en orden y hasta dónde está confirmado.</summary>
+    /// <summary>Estado de una partición de un tópico: sus segmentos en orden y hasta dónde está confirmado.</summary>
     private sealed class TopicLog
     {
-        public TopicLog(string dataDir, string topic)
+        public TopicLog(string dataDir, string topic, int partition)
         {
             Topic = topic;
-            DirectoryPath = Path.Combine(dataDir, topic);
+            Partition = partition;
+            DirectoryPath = Path.Combine(dataDir, topic, $"partition-{partition}");
             CheckpointFile = Path.Combine(DirectoryPath, CheckpointFileName);
         }
 
         /// <summary>Nombre del tópico. Se usa para que los mensajes de log digan de cuál hablan.</summary>
         public string Topic { get; }
 
+        /// <summary>Número de partición.</summary>
+        public int Partition { get; }
+
         public Lock Gate { get; } = new();
 
-        /// <summary>Quien agrupa los <c>fsync</c> de este tópico y sabe hasta dónde llega el disco.</summary>
+        /// <summary>Quien agrupa los <c>fsync</c> de esta partición y sabe hasta dónde llega el disco.</summary>
         public GroupCommitWriter Writer { get; } = new();
 
         public string DirectoryPath { get; }

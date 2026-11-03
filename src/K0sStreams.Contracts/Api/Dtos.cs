@@ -18,7 +18,7 @@ public sealed record TopicResponse(string Name, int Partitions, int MaxRetries, 
     }
 }
 
-/// <param name="Key">Opcional. Mensajes con la misma clave van a la misma partición.</param>
+/// <param name="Key">Opcional. Clasifica el mensaje; viaja con él.</param>
 /// <param name="Value">Contenido del mensaje.</param>
 /// <param name="DeliverAt">Opcional. Para colas: no se entrega antes de este momento.</param>
 public sealed record PublishRequest(string? Key, string Value, DateTimeOffset? DeliverAt = null);
@@ -32,11 +32,42 @@ public sealed record MessageResponse(long Offset, string? Key, string Value, Dat
 /// <param name="NextOffset">Valor de <c>from</c> para seguir leyendo.</param>
 public sealed record ReadResponse(IReadOnlyList<MessageResponse> Messages, long HighWatermark, long NextOffset);
 
+/// <param name="ConsumerId">Identificador único del consumidor.</param>
 /// <param name="VisibilitySeconds">Tiempo para hacer ack antes de que el mensaje vuelva a la cola. Por defecto 30.</param>
-public sealed record ReceiveRequest(int? VisibilitySeconds = null);
+public sealed record ReceiveRequest(string ConsumerId, int? VisibilitySeconds = null);
 
 public sealed record DeliveryResponse(int Partition, long Offset, string? Key, string Value, int Attempt, DateTimeOffset VisibleUntil);
 
 public sealed record NackRequest(string? Reason = null);
 
 public sealed record DeadLetterResponse(int Partition, long Offset, string? Key, string Value, int Attempts, string? LastReason);
+
+// Consumer Group API DTOs
+
+/// <param name="ConsumerId">Identificador único del consumidor.</param>
+public sealed record JoinGroupRequest(string ConsumerId);
+
+/// <param name="ConsumerId">Identificador único del consumidor.</param>
+/// <param name="Partitions">Particiones asignadas a este consumidor.</param>
+/// <param name="Generation">Generación del grupo (incrementa en cada rebalance).</param>
+public sealed record JoinGroupResponse(string ConsumerId, IReadOnlyList<int> Partitions, long Generation);
+
+/// <param name="ConsumerId">Identificador único del consumidor.</param>
+public sealed record LeaveGroupRequest(string ConsumerId);
+
+/// <param name="ConsumerId">Identificador único del consumidor.</param>
+public sealed record HeartbeatRequest(string ConsumerId);
+
+/// <param name="ConsumerId">Identificador único del consumidor.</param>
+/// <param name="Partitions">Particiones asignadas a este consumidor.</param>
+/// <param name="Generation">Generación actual del grupo.</param>
+public sealed record HeartbeatResponse(string ConsumerId, IReadOnlyList<int> Partitions, long Generation);
+
+/// <param name="ConsumerId">Identificador único del consumidor.</param>
+/// <param name="Offsets">Diccionario partición -> offset confirmado.</param>
+public sealed record CommitOffsetsRequest(string ConsumerId, IReadOnlyDictionary<int, long> Offsets);
+
+/// <param name="ConsumerId">Identificador único del consumidor.</param>
+/// <param name="LastHeartbeat">Último latido recibido.</param>
+/// <param name="AssignedPartitions">Particiones actualmente asignadas.</param>
+public sealed record ConsumerStateResponse(string ConsumerId, DateTimeOffset LastHeartbeat, IReadOnlyList<int> AssignedPartitions);

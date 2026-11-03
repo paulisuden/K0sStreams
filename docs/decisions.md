@@ -46,7 +46,7 @@ flowchart LR
 ```
 
 | | With partitions | Without |
-| --- | --- | --- |
+|---|---|---|
 | A message is identified by | topic + partition + offset | topic + offset |
 | Read as history | `GET /v1/topics/orders/partitions/1/messages?from=0` | `GET /v1/topics/orders/messages?from=0` |
 | Ack | `POST .../queues/billing/ack/1/42` | `POST .../queues/billing/ack/42` |
@@ -58,7 +58,7 @@ The last row is the key point. In "before", the three partitions all live on the
 ### What changes
 
 | Where | Change |
-| --- | --- |
+|---|---|
 | `ILog` | Drop the `partition` parameter from all six methods. |
 | `IReplicator` | `WaitForQuorumAsync(topic, offset)`. |
 | `IQueueEngine` | `AckAsync` and `NackAsync` drop `partition`; `Delivery` and `DeadLetter` drop `Partition`. |
@@ -112,7 +112,7 @@ Worth mentioning in the defense as the way the design would scale.
 ## DEC-002 · Promote a new leader instead of truncating to the high watermark
 
 | | |
-| --- | --- |
+|---|---|
 | Date | 14 Oct 2026 |
 | Proposed by | C, Replication |
 | Status | Implemented on `feature/replicacion` (replication iteration 3). Needs the team's approval before merging: it changes `Contracts` and the failover plan in ARQUITECTURA.md. |
@@ -155,7 +155,7 @@ sequenceDiagram
 ### What changes
 
 | Where | Change |
-| --- | --- |
+|---|---|
 | `Contracts` (own PR) | New `ILeaderPromotion` (`PromoteAsync(newEpoch)`), with D's obligations in its XML doc. New `ListTopics` RPC in `replication.proto`. Both additive. |
 | **A**, Storage | Don't truncate on `EpochChanged`; only on replication's request. Next Contracts batch: a way to list the topics in `ILog`, so a broker knows its topics after a restart. |
 | **B**, Queue and API | Skip `RecordType.EpochChange` records in history reads and queues: they aren't messages. Only write while `IsLeader`, stamping `CurrentEpoch` at append time. Around a failover, `WaitForQuorumAsync` throws `NotLeaderException` (307 or 503). |
@@ -187,7 +187,7 @@ sequenceDiagram
 ## DEC-003 · Store the topic catalog in the log
 
 | | |
-| --- | --- |
+|---|---|
 | Date | 22 Oct 2026 |
 | Proposed by | D, Platform and coordination |
 | Status | Agreed with A and B, who asked D to implement it. Done on `fix/failover-state`. |
@@ -207,7 +207,7 @@ The topic catalog lived only in memory (`InMemoryTopicCatalog`, open issue 1 in 
 ### What changes
 
 | Where | Change |
-| --- | --- |
+|---|---|
 | **A**, Storage | New `LogTopicCatalog`, registered instead of `InMemoryTopicCatalog` (which stays as a fake for tests). It needs `IReplicator` and `IClusterState`. |
 | **B**, API | Creating a topic goes to the leader (307 from a follower), like every other write. |
 | Contracts | Nothing. |
@@ -216,3 +216,136 @@ The topic catalog lived only in memory (`InMemoryTopicCatalog`, open issue 1 in 
 
 - **Derive the topics from the logs on disk.** Simpler, but the configuration the client asked for (`maxRetries`, `retryBackoff`) would be lost.
 - **A file next to the log.** Breaks "everything on disk goes through `ILog`", and would need its own replication.
+
+---
+
+## DEC-004 · Demo application: OpenTelemetry Astronomy Shop on k0s cluster
+
+| | |
+|---|---|
+| Date | 28 Oct 2026 |
+| Proposed by | Team (teacher requirement: multi-repo distributed system on university k0s cluster) |
+| Status | Decided. Replaces earlier "generic demo" plan. |
+
+### Context
+
+The teacher requires the final deliverable to be a **working distributed system on the university k0s cluster**, composed of **multiple repositories** that integrate into a running system. The demo must demonstrate:
+
+1. A real workload running on the university's k0s cluster
+2. Multiple services communicating via the custom message-oriented middleware (K0sStreams)
+3. The system actually working end-to-end, not just unit tests
+
+### Decision
+
+**Use the OpenTelemetry Astronomy Shop (OTel demo) as the demo application**, deployed on the university k0s cluster with K0sStreams replacing Kafka.
+
+### Why OpenTelemetry Astronomy Shop
+
+| Criterion | Fit |
+|---|---|
+| **Real microservices** | 10+ services (frontend, cart, checkout, payment, email, recommendation, ad, load generator, feature flags) |
+| **Message patterns** | Async events between services (checkout → payment → email), async processing (recommendation ML training), feature flag updates |
+| **OpenTelemetry native** | Built-in tracing/metrics/logs; demonstrates observability of K0sStreams |
+| **Kubernetes native** | Helm charts, Kustomize, ArgoCD ready; designed for k8s |
+| **Active maintenance** | CNCF project, regularly updated |
+| **No external deps** | Runs entirely in-cluster; no cloud services needed |
+
+### Architecture on k0s
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    k0s Cluster (3 nodes)                      │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+│  │ k0sstreams-0│  │ k0sstreams-1│  │ k0sstreams-2│          │
+│  │  (broker)   │  │  (broker)   │  │  (broker)   │          │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘          │
+│         └────────────────┼────────────────┘                  │
+│                          ▼                                   │
+│              ┌─────────────────────┐                         │
+│              │  MetalLB / Ingress  │                         │
+│              └──────────┬──────────┘                         │
+└─────────────────────────┼───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Astronomy Shop Services (10+)                   │
+│  ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌──────────┐          │
+│  │ Frontend│ │  Cart   │ │ Checkout │ │ Payment  │  ...     │
+│  └────┬────┘ └────┬────┘ └────┬─────┘ └────┬─────┘          │
+│       │           │           │           │                  │
+│       └───────────┼───────────┼───────────┘                  │
+│                   ▼           ▼                              │
+│            ┌──────────────────────┐                          │
+│            │   K0sStreams Topics  │                          │
+│            │ checkout, payment,   │                          │
+│            │ email, recommend,    │                          │
+│            │ feature-flags        │                          │
+│            └──────────────────────┘                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Required K0sStreams features for the demo
+
+| Feature | Status | Notes |
+|---|---|---|
+| Multi-partition topics | ✅ Done | Needed for checkout throughput |
+| Consumer group partition assignment | ✅ Done | Horizontal scaling of services |
+| At-least-once delivery + DLQ | ✅ Done | Payment/email reliability |
+| Scheduled messages | ✅ Done | Retry with backoff |
+| Retention (TTL/size) | ❌ **Needed** | Demo runs hours; disk fills without cleanup |
+| Offset commit API | ✅ Done | Consumer offset management |
+| TLS/mTLS | ❌ Not needed | Internal cluster only |
+
+### What changes
+
+| Where | Change |
+|---|---|
+| **Storage** | Add segment deletion by TTL/size (background task) |
+| **Contracts** | None |
+| **B**, Queue | No change |
+| **C**, Replication | No change |
+| **D**, Coordination | No change |
+| **Platform** | Helm charts for K0sStreams broker (3-replica StatefulSet) |
+| **Platform** | Helm/Kustomize for Astronomy Shop with K0sStreams config |
+| **Docs** | Deployment guide: k0s cluster → K0sStreams → Astronomy Shop |
+
+### Repositories involved (multi-repo requirement)
+
+1. `middlewares-distribuidos/K0sStreams` — the broker (this repo)
+2. `middlewares-distribuidos/cluster_k0s` — cluster provisioning (OpenTofu/k0sctl)
+3. `middlewares-distribuidos/k0sstreams-helm` — K0sStreams Helm chart (new)
+4. `middlewares-distribuidos/astronomy-shop-k0s` — Astronomy Shop Kustomize/Helm for k0s (new)
+5. `middlewares-distribuidos/docs` — Architecture, deployment, runbook (new)
+
+### Consequences
+
+**Gains**
+
+- Real, recognizable demo that evaluators understand immediately
+- Demonstrates K0sStreams under realistic microservice patterns
+- Meets teacher's multi-repo + working cluster requirement
+- OpenTelemetry traces show K0sStreams latency/throughput end-to-end
+
+**Risks**
+
+- Astronomy Shop expects Kafka protocol; K0sStreams uses HTTP API. Need HTTP-to-Kafka adapter or modify demo services to use HTTP API.
+- Retention must be implemented before demo runs for hours.
+- University cluster may have resource limits (CPU/memory/PVC size).
+
+### Alternatives considered
+
+| Option | Why rejected |
+|---|---|
+| Custom toy demo (producer/consumer) | Too simple; doesn't demonstrate "real distributed system" |
+| Online Boutique (Google microservices demo) | Similar to Astronomy Shop but no OpenTelemetry native |
+| Custom e-commerce stack | More work, less recognizable |
+
+### Next steps
+
+1. **Implement retention** in Storage (TTL + size-based segment deletion)
+2. **Create K0sStreams Helm chart** (`k0sstreams-helm` repo)
+3. **Fork Astronomy Shop** and adapt to K0sStreams HTTP API (or add Kafka protocol compat)
+4. **Create Astronomy Shop Kustomize** for k0s (`astronomy-shop-k0s` repo)
+5. **Provision university k0s cluster** (`cluster_k0s` repo, existing)
+6. **Deploy and validate** end-to-end traces in OpenTelemetry collector
+7. **Document** deployment, troubleshooting, demo script

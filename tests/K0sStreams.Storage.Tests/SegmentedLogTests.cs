@@ -48,11 +48,10 @@ public sealed class SegmentedLogTests : IDisposable
     }
 
     [Fact]
-    public void Una_particion_distinta_de_cero_se_rechaza()
+    public void Particion_negativa_se_rechaza()
     {
-        // DEC-001: un tópico es un único log. Mientras ILog siga llevando el parámetro,
-        // cualquier valor que no sea 0 se rechaza en vez de ignorarse en silencio.
-        _log.Invoking(l => l.EndOffset("t", 1)).Should().Throw<ArgumentOutOfRangeException>();
+        // Partitions must be non-negative
+        _log.Invoking(l => l.EndOffset("t", -1)).Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]

@@ -31,16 +31,16 @@ public sealed class GrpcReplicationTests : IAsyncLifetime
     public async Task Records_fetched_from_one_broker_are_replicated_to_another()
     {
         await SeedAsync(_leader.Log, 1, 1, 1);
-        _leader.Log.AdvanceHighWatermark(Topic, 2);
+        _leader.Log.AdvanceHighWatermark(Topic, 0, 2);
 
-        var batches = await _leader.Client.FetchAsync(new FetchRequest { Epoch = 1, Topic = Topic, FromOffset = 0 }).ToListAsync();
+        var batches = await _leader.Client.FetchAsync(new FetchRequest { Epoch = 1, Topic = Topic, Partition = 0, FromOffset = 0 }).ToListAsync();
         var append = Append(1, -1, 0, batches[^1].LeaderHw);
         append.Records.AddRange(batches.SelectMany(batch => batch.Records));
         var response = await _follower.Client.AppendAsync(append);
 
         response.Ok.Should().BeTrue();
         (await EncodedAsync(_follower.Log)).Should().Equal(await EncodedAsync(_leader.Log));
-        var state = await _follower.Client.GetStateAsync(new StateRequest { Topic = Topic });
+        var state = await _follower.Client.GetStateAsync(new StateRequest { Topic = Topic, Partition = 0 });
         state.Should().Be(new StateResponse { Epoch = 1, EndOffset = 2, HighWatermark = 2, NodeId = "broker-1", IsLeader = false });
     }
 
@@ -72,15 +72,15 @@ public sealed class GrpcReplicationTests : IAsyncLifetime
 
         (await _follower.Client.AppendAsync(Append(1, -1, 0, -1, big))).Ok.Should().BeTrue();
 
-        var batches = await _follower.Client.FetchAsync(new FetchRequest { Epoch = 1, Topic = Topic, FromOffset = 0 }).ToListAsync();
+        var batches = await _follower.Client.FetchAsync(new FetchRequest { Epoch = 1, Topic = Topic, Partition = 0, FromOffset = 0 }).ToListAsync();
         batches.Should().ContainSingle().Which.Records.Should().ContainSingle().Which.Length.Should().Be(RecordCodec.GetEncodedSize(big));
     }
 
     [Fact]
     public async Task Invalid_requests_fail_with_invalid_argument()
     {
-        var fetch = () => _follower.Client.FetchAsync(new FetchRequest { Topic = "../etc" }).ToListAsync().AsTask();
-        var getState = () => _follower.Client.GetStateAsync(new StateRequest { Topic = "../etc" });
+        var fetch = () => _follower.Client.FetchAsync(new FetchRequest { Topic = "../etc", Partition = 0 }).ToListAsync().AsTask();
+        var getState = () => _follower.Client.GetStateAsync(new StateRequest { Topic = "../etc", Partition = 0 });
 
         (await fetch.Should().ThrowAsync<RpcException>()).Which.StatusCode.Should().Be(StatusCode.InvalidArgument);
         (await getState.Should().ThrowAsync<RpcException>()).Which.StatusCode.Should().Be(StatusCode.InvalidArgument);
@@ -92,7 +92,7 @@ public sealed class GrpcReplicationTests : IAsyncLifetime
         using var channel = GrpcReplicationPeer.CreateChannel(new Uri("http://127.0.0.1:1"));
         var peer = new GrpcReplicationPeer(new GrpcReplication.ReplicationClient(channel), TimeSpan.FromSeconds(5), TimeProvider.System);
 
-        var act = () => peer.GetStateAsync(new StateRequest { Topic = Topic });
+        var act = () => peer.GetStateAsync(new StateRequest { Topic = Topic, Partition = 0 });
 
         (await act.Should().ThrowAsync<RpcException>()).Which.StatusCode.Should().Be(StatusCode.Unavailable);
     }

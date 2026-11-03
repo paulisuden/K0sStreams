@@ -32,14 +32,20 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     private Task<HttpResponseMessage> PublishAsync(string topic, string value, string? key = null) =>
         _client.PostAsJsonAsync($"/v1/topics/{topic}/messages", new PublishRequest(key, value));
 
-    private Task<HttpResponseMessage> ReceiveAsync(string topic, string queue = "facturacion") =>
-        _client.PostAsJsonAsync($"/v1/topics/{topic}/queues/{queue}/receive", new ReceiveRequest());
+    private Task<HttpResponseMessage> JoinGroupAsync(string topic, string consumerId = "consumer-1", string queue = "facturacion") =>
+        _client.PostAsJsonAsync($"/v1/topics/{topic}/queues/{queue}/join", new JoinGroupRequest(consumerId));
+
+    private Task<HttpResponseMessage> ReceiveAsync(string topic, string consumerId = "consumer-1", string queue = "facturacion") =>
+        _client.PostAsJsonAsync($"/v1/topics/{topic}/queues/{queue}/receive", new ReceiveRequest(consumerId));
 
     private Task<HttpResponseMessage> AckAsync(string topic, int partition, long offset, string queue = "facturacion") =>
         _client.PostAsync($"/v1/topics/{topic}/queues/{queue}/ack/{partition}/{offset}", null);
 
     private Task<HttpResponseMessage> NackAsync(string topic, int partition, long offset, string? reason = null, string queue = "facturacion") =>
         _client.PostAsJsonAsync($"/v1/topics/{topic}/queues/{queue}/nack/{partition}/{offset}", new NackRequest(reason));
+
+    private Task<HttpResponseMessage> HeartbeatAsync(string topic, string consumerId = "consumer-1", string queue = "facturacion") =>
+        _client.PostAsJsonAsync($"/v1/topics/{topic}/queues/{queue}/heartbeat", new HeartbeatRequest(consumerId));
 
     [Fact]
     public async Task Crear_topico_devuelve_created_y_la_configuracion()
@@ -87,7 +93,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     }
 
     [Fact]
-    public async Task Con_varias_particiones_todo_se_publica_en_la_particion_0()
+    public async Task Con_varias_particiones_los_mensajes_se_distribuyen_por_clave()
     {
         string topic = NewTopic();
         await CreateTopicAsync(topic, partitions: 3);
@@ -99,8 +105,10 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
             partitions.Add(published!.Partition);
         }
 
-        // DEC-001: cada tópico es un solo log, aunque se haya pedido más de una partición.
-        partitions.Should().AllBeEquivalentTo(0);
+        // Same key should always go to same partition
+        partitions.Should().AllSatisfy(p => p.Should().BeInRange(0, 2));
+        // Different keys should (probably) go to different partitions
+        partitions.Distinct().Should().HaveCountGreaterThan(1);
     }
 
     [Fact]
@@ -150,7 +158,8 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
         string topic = NewTopic();
         await CreateTopicAsync(topic);
         await PublishAsync(topic, "a");
-        await ReceiveAsync(topic);
+        await JoinGroupAsync(topic);
+        await ReceiveAsync(topic, "consumer-1");
 
         ReadResponse? read = await _client.GetFromJsonAsync<ReadResponse>($"/v1/topics/{topic}/partitions/0/messages?from=0&max=10");
 
@@ -164,14 +173,15 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
         string topic = NewTopic();
         await CreateTopicAsync(topic);
         await PublishAsync(topic, "a");
+        await JoinGroupAsync(topic);
 
-        var first = await ReceiveAsync(topic);
+        var first = await ReceiveAsync(topic, "consumer-1");
         DeliveryResponse? delivery = await first.Content.ReadFromJsonAsync<DeliveryResponse>();
         delivery!.Offset.Should().Be(0);
         delivery.Partition.Should().Be(0);
         delivery.Attempt.Should().Be(1);
 
-        (await ReceiveAsync(topic)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await ReceiveAsync(topic, "consumer-1")).StatusCode.Should().Be(HttpStatusCode.NoContent);
     }
 
     [Fact]
@@ -180,7 +190,8 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
         string topic = NewTopic();
         await CreateTopicAsync(topic);
         await PublishAsync(topic, "a");
-        var first = await ReceiveAsync(topic);
+        await JoinGroupAsync(topic);
+        var first = await ReceiveAsync(topic, "consumer-1");
         DeliveryResponse? delivery = await first.Content.ReadFromJsonAsync<DeliveryResponse>();
 
         (await AckAsync(topic, delivery!.Partition, delivery.Offset)).StatusCode.Should().Be(HttpStatusCode.OK);
@@ -193,11 +204,12 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
         string topic = NewTopic();
         await CreateTopicAsync(topic);
         await PublishAsync(topic, "a");
-        var first = await ReceiveAsync(topic);
+        await JoinGroupAsync(topic);
+        var first = await ReceiveAsync(topic, "consumer-1");
         DeliveryResponse? delivery = await first.Content.ReadFromJsonAsync<DeliveryResponse>();
         await AckAsync(topic, delivery!.Partition, delivery.Offset);
 
-        (await ReceiveAsync(topic)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await ReceiveAsync(topic, "consumer-1")).StatusCode.Should().Be(HttpStatusCode.NoContent);
     }
 
     [Fact]
@@ -206,7 +218,8 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
         string topic = NewTopic();
         await CreateTopicAsync(topic, 1);
         await PublishAsync(topic, "a");
-        var first = await ReceiveAsync(topic);
+        await JoinGroupAsync(topic);
+        var first = await ReceiveAsync(topic, "consumer-1");
         DeliveryResponse? delivery = await first.Content.ReadFromJsonAsync<DeliveryResponse>();
 
         (await NackAsync(topic, delivery!.Partition, delivery.Offset, "prueba")).StatusCode.Should().Be(HttpStatusCode.OK);
