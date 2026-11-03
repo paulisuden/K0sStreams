@@ -6,6 +6,8 @@ using K0sStreams.Storage;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Configuración: appsettings.json + appsettings.{Environment}.json (ej. appsettings.k8s.json si ASPNETCORE_ENVIRONMENT=k8s)
+// + variables de entorno (prefijo Broker__, Retention__, Replication__, Coordination__)
 // Cada bloque registra lo suyo en su proyecto (ServiceCollectionExtensions.cs); este archivo no debería cambiar.
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddK0sStorage(builder.Configuration);        // A
