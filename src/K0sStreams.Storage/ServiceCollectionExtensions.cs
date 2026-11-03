@@ -2,6 +2,7 @@ using K0sStreams.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace K0sStreams.Storage;
 
@@ -15,11 +16,17 @@ public static class ServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
+        services.AddOptions<RetentionOptions>()
+            .Bind(configuration.GetSection(RetentionOptions.SectionName))
+            .Validate(static o => o.IsValid(), "Retention: MaxAge and MaxBytes must be positive if set.")
+            .ValidateOnStart();
+
         // GetService y no GetRequiredService: si el host no configuró logging, el log arranca sin
         // loguear en lugar de no arrancar. El arranque rápido manda (CLAUDE.md, sondas de Kubernetes).
         services.AddSingleton<ILog>(provider => new SegmentedLog(
             ResolveDataDir(configuration),
             SegmentedLog.DefaultSegmentBytes,
+            provider.GetRequiredService<IOptions<RetentionOptions>>().Value,
             provider.GetService<ILogger<SegmentedLog>>()));
 
         // Los tópicos se guardan en el mismo log, replicados por quórum (DEC-003). Necesita IReplicator e IClusterState,

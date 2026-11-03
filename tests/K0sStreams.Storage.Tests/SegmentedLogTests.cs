@@ -17,7 +17,7 @@ public sealed class SegmentedLogTests : IDisposable
     private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "k0sstreams-tests", Guid.NewGuid().ToString("N"));
     private readonly SegmentedLog _log;
 
-    public SegmentedLogTests() => _log = new SegmentedLog(_dataDir);
+    public SegmentedLogTests() => _log = new SegmentedLog(_dataDir, SegmentedLog.DefaultSegmentBytes, new RetentionOptions());
 
     // Dispose es el método de limpieza. xUnit lo llama cuando el test termina, pase o falle y borra la carpeta temporal
     public void Dispose()

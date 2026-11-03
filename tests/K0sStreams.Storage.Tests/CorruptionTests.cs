@@ -34,7 +34,7 @@ public sealed class CorruptionTests : IDisposable
     private string Carpeta => Path.Combine(_dataDir, Topico);
 
     private SegmentedLog Reiniciar(long limite = SegmentedLog.DefaultSegmentBytes) =>
-        new(_dataDir, limite, _logger);
+        new(_dataDir, limite, new RetentionOptions(), _logger);
 
     public void Dispose()
     {
