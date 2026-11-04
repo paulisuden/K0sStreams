@@ -54,7 +54,7 @@ public sealed class LogTopicCatalog(ILog log, IReplicator replicator, IClusterSt
                 Encoding.UTF8.GetBytes(config.Name),
                 JsonSerializer.SerializeToUtf8Bytes(config));
             long offset = await log.AppendAsync(TopicsLog, Partition, record, ct).ConfigureAwait(false);
-            await replicator.WaitForQuorumAsync(TopicsLog, Partition, offset, ct).ConfigureAwait(false);
+            await replicator.WaitForQuorumAsync(TopicsLog, Partition, offset, null, ct).ConfigureAwait(false);
             CatchUp();
             return true;
         }

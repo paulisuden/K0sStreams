@@ -375,8 +375,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             partition,
             commitEvent.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
             ct).ConfigureAwait(false);
-
-        await replicator.WaitForQuorumAsync(topic, partition, commitOffset, ct).ConfigureAwait(false);
+        await replicator.WaitForQuorumAsync(topic, partition, commitOffset, null, ct).ConfigureAwait(false);
 
         _committedOffsets.AddOrUpdate(
             Key(topic, queue, partition),
@@ -394,7 +393,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             marker.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
             ct).ConfigureAwait(false);
 
-        await replicator.WaitForQuorumAsync(topic, partition, markerOffset, ct).ConfigureAwait(false);
+        await replicator.WaitForQuorumAsync(topic, partition, markerOffset, null, ct).ConfigureAwait(false);
     }
 
     /// <summary>Estado materializado de una cola. Lo durable es solo el cursor; el resto es efímero.</summary>

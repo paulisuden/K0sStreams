@@ -74,7 +74,7 @@ public class LeaderPromotionTests
         cluster.Heal(0); // it comes back still believing it leads epoch 1
 
         long offset = await cluster.WriteAsync(0, "from the old leader");
-        var wait = cluster.Brokers[0].Replicator.WaitForQuorumAsync(Topic, 0, offset).AsTask();
+        var wait = cluster.Brokers[0].Replicator.WaitForQuorumAsync(Topic, 0, offset, null).AsTask();
 
         await cluster.EventuallyAsync(() => wait.IsCompleted, "the old leader's write to end");
         await FluentActions.Awaiting(() => wait).Should().ThrowAsync<NotLeaderException>();

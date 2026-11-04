@@ -128,14 +128,14 @@ public sealed class LogTopicCatalogTests : IDisposable
     /// <summary>Un líder que todavía espera a los seguidores: no sube el high watermark.</summary>
     private sealed class NoQuorumYet : IReplicator
     {
-        public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default) =>
+        public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, TimeSpan? timeout = null, CancellationToken ct = default) =>
             ValueTask.CompletedTask;
     }
 
     /// <summary>Un líder que perdió el liderazgo mientras esperaba el quórum.</summary>
     private sealed class NotLeaderReplicator : IReplicator
     {
-        public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default) =>
+        public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, TimeSpan? timeout = null, CancellationToken ct = default) =>
             ValueTask.FromException(new NotLeaderException("Otro broker es el líder."));
     }
 }
