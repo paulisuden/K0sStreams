@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using K0sStreams.Contracts;
 
 namespace K0sStreams.Queue;
@@ -17,6 +18,10 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
 {
     private readonly ConcurrentDictionary<string, QueueState> _queues = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConsumerGroupState> _consumerGroups = new(StringComparer.Ordinal);
+
+    // Offsets confirmados por consumidor por (tópico/cola/partición). Un receive nunca
+    // entrega un offset menor o igual al confirmado para esa cola+partición.
+    private readonly ConcurrentDictionary<string, long> _committedOffsets = new(StringComparer.Ordinal);
 
     // Época en la que se releyó cada tópico desde el log, y un semáforo para que se relea una sola vez (ver EnsureRebuiltAsync).
     private readonly ConcurrentDictionary<string, long> _rebuiltInEpoch = new(StringComparer.Ordinal);
@@ -58,7 +63,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                 continue;
             }
 
-            long scanFrom = 0;
+            // No volver a entregar offsets ya confirmados por este consumidor en esta cola.
+            long scanFrom = _committedOffsets.GetOrAdd(Key(topic, queue, partition), -1) + 1;
             while (scanFrom <= highWatermark)
             {
                 Record? found = null;
@@ -125,7 +131,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
 
         await AppendEventAsync(
             topic,
-            new QueueEvent(RecordType.Ack, queue, partition, offset, UntilMs: 0),
+            new QueueEvent(RecordType.Ack, queue, partition, offset, HastaMs: 0),
             ct).ConfigureAwait(false);
         return true;
     }
@@ -159,7 +165,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             await AppendEventAsync(
                 topic,
                 // UntilMs 0: sin próximo intento. Así Apply lo reconstruye como DLQ y no como un reintento programado.
-                new QueueEvent(RecordType.Nack, queue, partition, offset, UntilMs: 0, reason),
+                new QueueEvent(RecordType.Nack, queue, partition, offset, HastaMs: 0, reason),
                 ct).ConfigureAwait(false);
             return true;
         }
@@ -191,7 +197,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         var group = _consumerGroups.GetOrAdd(groupKey, _ => new ConsumerGroupState(topicConfig.Partitions));
 
         var assignment = group.Join(consumerId);
-        await PersistGroupStateAsync(topic, queue, group, ct).ConfigureAwait(false);
+        // El estado del grupo se persiste al salir o hacer heartbeat; el alta inicial vive en memoria
+        // hasta el siguiente cambio. Si el líder cae, el consumidor se vuelve a unir.
 
         return new ConsumerAssignment(consumerId, assignment.Partitions, assignment.Generation);
     }
@@ -257,13 +264,18 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             {
                 throw new InvalidOperationException($"El consumidor '{consumerId}' no tiene asignada la partición {partition}.");
             }
-            // Persist committed offset per partition
-            // In a real implementation, this would write to a committed-offsets topic/log
-        }
 
-        // For now, we just verify ownership; actual offset persistence would need a separate log
-        // or we can piggyback on the queue log with a new event type
-        await Task.CompletedTask.ConfigureAwait(false);
+            // Escribir el evento de confirmación al log y esperar quórum, igual que un mensaje.
+            var commitEvent = QueueEvent.ConfirmarOffset(queue, partition, offset);
+            long commitOffset = await log.AppendAsync(
+                topic,
+                partition,
+                commitEvent.ARegistro(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
+                ct).ConfigureAwait(false);
+            await replicator.WaitForQuorumAsync(topic, partition, commitOffset, null, ct).ConfigureAwait(false);
+
+            _committedOffsets.AddOrUpdate(Key(topic, queue, partition), offset, (_, existing) => Math.Max(existing, offset));
+        }
     }
 
     /// <inheritdoc />
@@ -296,19 +308,46 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
     public void Apply(string topic, Record queueEvent)
     {
         ArgumentNullException.ThrowIfNull(queueEvent);
-        if (!QueueEvent.IsQueueEvent(queueEvent.Type))
+        if (!QueueEvent.EsEventoDeCola(queueEvent.Type))
         {
             return;
         }
 
-        var replayed = QueueEvent.FromRecord(queueEvent);
-        QueueState state = _queues.GetOrAdd(Key(topic, replayed.Queue), _ => new QueueState());
-        state.Apply(replayed);
+        var replayed = QueueEvent.DesdeRegistro(queueEvent);
+        switch (replayed.Tipo)
+        {
+            case RecordType.Receive or RecordType.Ack or RecordType.Nack or RecordType.Timeout:
+            {
+                QueueState state = _queues.GetOrAdd(Key(topic, replayed.Cola), _ => new QueueState());
+                state.Apply(replayed);
+                break;
+            }
+
+            case RecordType.OffsetCommit:
+                _committedOffsets.AddOrUpdate(
+                    Key(topic, replayed.Cola, replayed.Particion),
+                    replayed.OffsetObjetivo,
+                    (_, existing) => Math.Max(existing, replayed.OffsetObjetivo));
+                break;
+
+            case RecordType.GroupState:
+                var miembros = QueueEvent.DeserializarEstadoDelGrupo(queueEvent.Value.Span, out long generacion);
+                if (miembros is not null)
+                {
+                    int partitions = catalog.Find(topic) is { } config ? config.Partitions : 1;
+                    var group = new ConsumerGroupState(partitions);
+                    group.RebuildFromPersisted(generacion, miembros);
+                    _consumerGroups[Key(topic, replayed.Cola)] = group;
+                }
+                break;
+        }
     }
 
     public void Dispose() => _rebuilding.Dispose();
 
     private static string Key(string topic, string queue) => $"{topic}/{queue}";
+
+    private static string Key(string topic, string queue, int partition) => $"{topic}/{queue}/{partition}";
 
     /// <summary>
     /// Relee del log los eventos de cola del tópico la primera vez que se usa en cada época. La memoria puede no coincidir
@@ -392,17 +431,32 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
     {
         long offset = await log.AppendAsync(
             topic,
-            queueEvent.Partition,
-            queueEvent.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
+            queueEvent.Particion,
+            queueEvent.ARegistro(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
             ct).ConfigureAwait(false);
-        await replicator.WaitForQuorumAsync(topic, queueEvent.Partition, offset, null, ct).ConfigureAwait(false);
+        await replicator.WaitForQuorumAsync(topic, queueEvent.Particion, offset, null, ct).ConfigureAwait(false);
     }
 
-    private static async ValueTask PersistGroupStateAsync(string topic, string queue, ConsumerGroupState group, CancellationToken ct)
+    private async ValueTask PersistGroupStateAsync(string topic, string queue, ConsumerGroupState group, CancellationToken ct)
     {
-        // Persist group state to log as a special event
-        // For now, we keep it in memory and rebuild from queue events on recovery
-        await Task.CompletedTask.ConfigureAwait(false);
+        var members = new Dictionary<string, IReadOnlyList<int>>(StringComparer.Ordinal);
+        foreach (var state in group.GetAllStates())
+        {
+            members[state.ConsumerId] = state.AssignedPartitions;
+        }
+
+        var payload = QueueEvent.SerializarEstadoDelGrupo(group.Generation, members);
+        var record = new Record(
+            Record.Unassigned,
+            cluster.CurrentEpoch,
+            RecordType.GroupState,
+            time.GetUtcNow().ToUnixTimeMilliseconds(),
+            0,
+            Encoding.UTF8.GetBytes(queue),
+            payload);
+
+        long offset = await log.AppendAsync(topic, 0, record, ct).ConfigureAwait(false);
+        await replicator.WaitForQuorumAsync(topic, 0, offset, null, ct).ConfigureAwait(false);
     }
 
     private const int BatchSize = 512;
@@ -576,14 +630,14 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         {
             lock (_gate)
             {
-                var key = (replayed.Partition, replayed.TargetOffset);
-                switch (replayed.Type)
+                var key = (replayed.Particion, replayed.OffsetObjetivo);
+                switch (replayed.Tipo)
                 {
                     case RecordType.Receive:
                         // UntilMs es el fin de la visibilidad: hay que reconstruirlo también,
                         // o un mensaje en proceso volvería a entregarse de inmediato.
                         _inFlight.Add(key);
-                        _visibleUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.UntilMs);
+                        _visibleUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.HastaMs);
                         _attempts.TryGetValue(key, out int attemptReceive);
                         _attempts[key] = attemptReceive + 1;
                         break;
@@ -602,13 +656,13 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                     case RecordType.Nack:
                         _inFlight.Remove(key);
                         _visibleUntil.Remove(key);
-                        if (replayed.Reason is not null)
+                        if (replayed.Razon is not null)
                         {
-                            _lastReason[key] = replayed.Reason;
+                            _lastReason[key] = replayed.Razon;
                         }
-                        if (replayed.UntilMs > 0)
+                        if (replayed.HastaMs > 0)
                         {
-                            _scheduledUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.UntilMs);
+                            _scheduledUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.HastaMs);
                         }
                         else
                         {
@@ -691,6 +745,32 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 return [.. _members.Values.Select(m => new ConsumerState(m.ConsumerId, m.LastHeartbeat, m.AssignedPartitions))];
+            }
+        }
+
+        /// <summary>Generación actual del grupo (incrementa en cada rebalance).</summary>
+        public long Generation => _generation;
+
+        /// <summary>
+        /// Reconstruye el estado del grupo desde un evento GroupState persistido en el log.
+        /// Se usa cuando un broker se reinicia o se convierte en líder.
+        /// </summary>
+        internal void RebuildFromPersisted(long generacion, IReadOnlyDictionary<string, IReadOnlyList<int>> miembros)
+        {
+            lock (_gate)
+            {
+                _generation = generacion;
+                _members.Clear();
+                foreach (var (consumerId, particiones) in miembros)
+                {
+                    var member = new ConsumerMember(consumerId);
+                    foreach (var p in particiones)
+                    {
+                        member.AssignedPartitions.Add(p);
+                    }
+                    member.LastHeartbeat = DateTimeOffset.UtcNow;
+                    _members[consumerId] = member;
+                }
             }
         }
 

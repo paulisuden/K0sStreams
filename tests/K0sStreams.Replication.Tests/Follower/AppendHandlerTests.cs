@@ -313,12 +313,12 @@ public sealed class AppendHandlerTests : IDisposable
     [Fact]
     public async Task Queue_events_replicate_like_messages()
     {
-        var ack = new QueueEvent(RecordType.Ack, "billing", 0, 0, 0).ToRecord(epoch: 1, timestamp: 1234) with { Offset = 1 };
+        var ack = new QueueEvent(RecordType.Ack, "billing", 0, 0, 0).ARegistro(epoca: 1, timestamp: 1234) with { Offset = 1 };
 
         (await AppendAsync(Append(1, -1, 0, -1, Message(0, 1, "order"), ack))).Ok.Should().BeTrue();
 
         var stored = await _follower.Log.ReadAsync(Topic, 0, 1, 1).SingleAsync();
-        QueueEvent.FromRecord(stored).Should().Be(new QueueEvent(RecordType.Ack, "billing", 0, 0, 0));
+        QueueEvent.DesdeRegistro(stored).Should().Be(new QueueEvent(RecordType.Ack, "billing", 0, 0, 0));
     }
 
     [Fact]

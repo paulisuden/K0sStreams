@@ -113,11 +113,11 @@ public sealed class QueueEngineTests : IDisposable
         var records = await ReadAllAsync("pedidos", 0);
         records.Should().HaveCount(2);
         records[1].Type.Should().Be(RecordType.Receive);
-        var queueEvent = QueueEvent.FromRecord(records[1]);
-        queueEvent.Queue.Should().Be("facturacion");
-        queueEvent.Partition.Should().Be(delivery!.Partition);
-        queueEvent.TargetOffset.Should().Be(delivery.Offset);
-        queueEvent.UntilMs.Should().Be(visibleUntil.ToUnixTimeMilliseconds());
+        var queueEvent = QueueEvent.DesdeRegistro(records[1]);
+        queueEvent.Cola.Should().Be("facturacion");
+        queueEvent.Particion.Should().Be(delivery!.Partition);
+        queueEvent.OffsetObjetivo.Should().Be(delivery.Offset);
+        queueEvent.HastaMs.Should().Be(visibleUntil.ToUnixTimeMilliseconds());
     }
 
     [Fact]
@@ -402,7 +402,7 @@ public sealed class QueueEngineTests : IDisposable
         var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
-            if (QueueEvent.IsQueueEvent(record.Type))
+            if (QueueEvent.EsEventoDeCola(record.Type))
             {
                 recovered.Apply("pedidos", record);
             }
@@ -426,7 +426,7 @@ public sealed class QueueEngineTests : IDisposable
         var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
-            if (QueueEvent.IsQueueEvent(record.Type))
+            if (QueueEvent.EsEventoDeCola(record.Type))
             {
                 recovered.Apply("pedidos", record);
             }
@@ -454,7 +454,7 @@ public sealed class QueueEngineTests : IDisposable
         var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
-            if (QueueEvent.IsQueueEvent(record.Type))
+            if (QueueEvent.EsEventoDeCola(record.Type))
             {
                 recovered.Apply("pedidos", record);
             }
@@ -480,6 +480,65 @@ public sealed class QueueEngineTests : IDisposable
 
         await recovered.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
         (await recovered.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task CommitOffsets_escribe_evento_en_el_log_y_no_entrega_de_nuevo_despues_de_reinicio()
+    {
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a", "b", "c");
+        await JoinGroupAsync();
+
+        // Recibir y confirmar el offset 0
+        var d1 = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
+        d1.Should().NotBeNull();
+        await _engine.CommitOffsetsAsync("pedidos", "facturacion", "consumer-1", new Dictionary<int, long> { [0] = 0 });
+
+        // Verificar que el evento de confirmación está en el log
+        var records = await ReadAllAsync("pedidos", 0);
+        records.Should().Contain(r => r.Type == RecordType.OffsetCommit);
+
+        // Reiniciar el motor: el offset 0 ya no debería entregarse
+        using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        (await restarted.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task PersistGroupState_escribe_evento_de_grupo_en_el_log()
+    {
+        await CreateTopicAsync();
+        await JoinGroupAsync();
+
+        // Forzar persistencia del estado del grupo mediante un heartbeat
+        await _engine.HeartbeatAsync("pedidos", "facturacion", "consumer-1");
+
+        var records = await ReadAllAsync("pedidos", 0);
+        records.Should().Contain(r => r.Type == RecordType.GroupState);
+    }
+
+    [Fact]
+    public async Task Estado_del_grupo_sobrevive_a_un_reinicio()
+    {
+        await CreateTopicAsync(partitions: 2);
+        await AppendMessagesAsync("pedidos", 0, "a");
+        await AppendMessagesAsync("pedidos", 1, "b");
+
+        // Dos consumidores se unen y se reparten las particiones
+        await _engine.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        await _engine.JoinGroupAsync("pedidos", "facturacion", "consumer-2");
+        await _engine.HeartbeatAsync("pedidos", "facturacion", "consumer-1");
+        await _engine.HeartbeatAsync("pedidos", "facturacion", "consumer-2");
+
+        // Reiniciar: el estado del grupo debe recuperarse del log
+        using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-2");
+
+        var states = restarted.GetConsumerStates("pedidos", "facturacion");
+        states.Should().HaveCount(2);
+        states.Should().Contain(s => s.ConsumerId == "consumer-1");
+        states.Should().Contain(s => s.ConsumerId == "consumer-2");
     }
 }
 

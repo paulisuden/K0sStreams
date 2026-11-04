@@ -9,11 +9,11 @@ public class QueueEventTests
     {
         var evt = new QueueEvent(RecordType.Nack, "facturacion", 2, 150, 1_790_000_000_000, "timeout del proveedor");
 
-        var record = evt.ToRecord(epoch: 4, timestamp: 1_789_999_999_000);
+        var record = evt.ARegistro(epoca: 4, timestamp: 1_789_999_999_000);
 
         record.Type.Should().Be(RecordType.Nack);
         record.Offset.Should().Be(Record.Unassigned);
-        QueueEvent.FromRecord(record).Should().Be(evt);
+        QueueEvent.DesdeRegistro(record).Should().Be(evt);
     }
 
     [Fact]
@@ -21,7 +21,7 @@ public class QueueEventTests
     {
         var evt = new QueueEvent(RecordType.Ack, "q", 0, 7, 0);
 
-        QueueEvent.FromRecord(evt.ToRecord(1, 0)).Reason.Should().BeNull();
+        QueueEvent.DesdeRegistro(evt.ARegistro(1, 0)).Razon.Should().BeNull();
     }
 
     [Fact]
@@ -29,6 +29,6 @@ public class QueueEventTests
     {
         var evt = new QueueEvent(RecordType.Message, "q", 0, 0, 0);
 
-        evt.Invoking(e => e.ToRecord(1, 0)).Should().Throw<InvalidOperationException>();
+        evt.Invoking(e => e.ARegistro(1, 0)).Should().Throw<InvalidOperationException>();
     }
 }
