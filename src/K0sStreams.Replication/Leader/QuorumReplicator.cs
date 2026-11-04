@@ -1,6 +1,7 @@
 using K0sStreams.Contracts;
 using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Network;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -16,7 +17,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
 {
     private readonly Lock _gate = new();
     private readonly IClusterState _cluster;
-    private readonly ITopicCatalog _catalog;
+    private readonly IServiceProvider _services;
     private readonly KnownTopics _knownTopics;
     private readonly KeyValuePair<string, IReplicationPeer>[] _peers;
     private LeaderTerm? _term;
@@ -26,7 +27,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         ILog log,
         IClusterState cluster,
         EpochTracker epochs,
-        ITopicCatalog catalog,
+        IServiceProvider services,
         KnownTopics knownTopics,
         IReadOnlyDictionary<string, IReplicationPeer> peers,
         IOptions<ReplicationOptions> options,
@@ -36,7 +37,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         ArgumentNullException.ThrowIfNull(peers);
         Log = log;
         _cluster = cluster;
-        _catalog = catalog;
+        _services = services;
         Epochs = epochs;
         _knownTopics = knownTopics;
         _peers = [.. peers.OrderBy(static peer => peer.Key, StringComparer.Ordinal)];
@@ -283,8 +284,9 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
     /// </summary>
     private Dictionary<string, int> TopicsToReplicate()
     {
+        var catalog = _services.GetRequiredService<ITopicCatalog>();
         var topics = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (TopicConfig config in _catalog.List())
+        foreach (TopicConfig config in catalog.List())
         {
             topics[config.Name] = config.Partitions;
         }

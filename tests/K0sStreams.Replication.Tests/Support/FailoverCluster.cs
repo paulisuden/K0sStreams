@@ -4,6 +4,7 @@ using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Failover;
 using K0sStreams.Replication.Leader;
 using K0sStreams.Replication.Network;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -19,8 +20,11 @@ internal sealed class FailoverBroker : IAsyncDisposable
     {
         Node = node;
         var wrapped = Microsoft.Extensions.Options.Options.Create(options);
+        var catalogServices = new ServiceCollection();
+        catalogServices.AddSingleton<ITopicCatalog>(node.Catalog);
+        var catalogProvider = catalogServices.BuildServiceProvider();
         Replicator = new QuorumReplicator(
-            node.Log, node.Cluster, node.Epochs, node.Catalog, node.KnownTopics, peers, wrapped, time,
+            node.Log, node.Cluster, node.Epochs, catalogProvider, node.KnownTopics, peers, wrapped, time,
             NullLogger<QuorumReplicator>.Instance);
         Survey = new PeerSurvey(node.Node, node.Cluster, node.Catalog, peers, new MajorityCall(wrapped, time), node.Epochs);
         Promotion = new LeaderPromotion(

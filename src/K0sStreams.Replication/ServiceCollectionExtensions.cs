@@ -56,7 +56,7 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<ILog>(),
             sp.GetRequiredService<IClusterState>(),
             sp.GetRequiredService<EpochTracker>(),
-            sp.GetRequiredService<ITopicCatalog>(),
+            sp, // IServiceProvider: ITopicCatalog se resuelve perezosamente para romper la dependencia circular (LogTopicCatalog necesita IReplicator)
             sp.GetRequiredService<KnownTopics>(),
             sp.GetRequiredService<PeerDirectory>().Peers,
             sp.GetRequiredService<IOptions<ReplicationOptions>>(),

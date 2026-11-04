@@ -3,6 +3,7 @@ using K0sStreams.Contracts;
 using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Leader;
 using K0sStreams.Replication.Network;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -34,11 +35,15 @@ internal sealed class ReplicationCluster : IAsyncDisposable
             peers[_followers[i].Cluster.NodeId] = _links[i];
         }
 
+        var catalogServices = new ServiceCollection();
+        catalogServices.AddSingleton<ITopicCatalog>(Leader.Catalog);
+        var catalogProvider = catalogServices.BuildServiceProvider();
+
         Replicator = new QuorumReplicator(
             Leader.Log,
             Leader.Cluster,
             Leader.Epochs,
-            Leader.Catalog,
+            catalogProvider,
             Leader.KnownTopics,
             peers,
             Microsoft.Extensions.Options.Options.Create(Options),
