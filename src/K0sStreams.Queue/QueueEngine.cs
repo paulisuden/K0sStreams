@@ -350,24 +350,28 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
 
     /// <summary>
     /// Aplica todos los eventos del log, no solo hasta el high watermark: un líder nuevo termina confirmando todo su log.
-    /// Solo la partición 0, porque cada tópico es un solo log (DEC-001).
+    /// Recorre todas las particiones del tópico (según el catálogo), no solo la 0.
     /// </summary>
     private async ValueTask ReplayAsync(string topic, CancellationToken ct)
     {
-        long next = 0;
-        while (true)
+        int partitions = catalog.Find(topic) is { } config ? config.Partitions : 1;
+        for (int partition = 0; partition < partitions; partition++)
         {
-            int read = 0;
-            await foreach (var record in log.ReadAsync(topic, 0, next, BatchSize, ct).ConfigureAwait(false))
+            long next = 0;
+            while (true)
             {
-                Apply(topic, record);
-                next = record.Offset + 1;
-                read++;
-            }
+                int read = 0;
+                await foreach (var record in log.ReadAsync(topic, partition, next, BatchSize, ct).ConfigureAwait(false))
+                {
+                    Apply(topic, record);
+                    next = record.Offset + 1;
+                    read++;
+                }
 
-            if (read == 0)
-            {
-                return;
+                if (read == 0)
+                {
+                    break;
+                }
             }
         }
     }
