@@ -27,11 +27,11 @@ public class GrpcQuorumTests
         });
 
         long first = await leader.Log.AppendAsync(Topic, 0, Message(Record.Unassigned, 1, "first"));
-        await leader.Replicator.WaitForQuorumAsync(Topic, 0, first).AsTask().WaitAsync(Patience);
+        await leader.Replicator.WaitForQuorumAsync(Topic, 0, first, null).AsTask().WaitAsync(Patience);
 
         await follower2.DisposeAsync();
         long second = await leader.Log.AppendAsync(Topic, 0, Message(Record.Unassigned, 1, "second"));
-        await leader.Replicator.WaitForQuorumAsync(Topic, 0, second).AsTask().WaitAsync(Patience);
+        await leader.Replicator.WaitForQuorumAsync(Topic, 0, second, null).AsTask().WaitAsync(Patience);
 
         await using var restarted = await ReplicationTestServer.StartAsync("broker-2", port: follower2Port);
         await Eventually.UntilAsync(() => restarted.Log.EndOffset(Topic, 0) == second, "the restarted follower to catch up");

@@ -64,7 +64,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
 
     internal string NodeId { get; }
 
-    public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default)
+    public async ValueTask WaitForQuorumAsync(string topic, int partition, long offset, TimeSpan? timeout = null, CancellationToken ct = default)
     {
         if (!TopicConfig.IsValidName(topic) || partition < 0)
         {
@@ -76,7 +76,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed), this);
         if (ct.IsCancellationRequested)
         {
-            return ValueTask.FromCanceled(ct);
+            return;
         }
 
         // Before the leadership check, never after: a new leader's ListTopics then either lists this topic, or had
@@ -85,24 +85,43 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         var term = CurrentTerm();
         if (term is null)
         {
-            return ValueTask.FromException(new NotLeaderException("This broker is not the leader."));
+            throw new NotLeaderException("This broker is not the leader.");
         }
 
         if (_peers.Length == 0)
         {
             Log.AdvanceHighWatermark(topic, partition, offset);
-            return ValueTask.CompletedTask;
+            return;
         }
 
         if (offset <= Log.HighWatermark(topic, partition))
         {
-            return ValueTask.CompletedTask;
+            return;
         }
 
         var replication = GetOrStartTopic(term, topic, partition, offset);
-        return replication is null
-            ? ValueTask.FromException(new NotLeaderException("This broker stopped leading before the write was confirmed."))
-            : new ValueTask(replication.WaitAsync(offset, ct));
+        if (replication is null)
+        {
+            throw new NotLeaderException("This broker stopped leading before the write was confirmed.");
+        }
+
+        var waitTask = replication.WaitAsync(offset, ct);
+        if (timeout is null)
+        {
+            await waitTask.ConfigureAwait(false);
+            return;
+        }
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout.Value);
+        try
+        {
+            await waitTask.WaitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cts.Token.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            throw new QuorumLostException($"Quorum not reached for {topic} partition {partition} at offset {offset} within {timeout.Value}.");
+        }
     }
 
     /// <summary>True while this broker leads at <paramref name="term"/>'s epoch, with no newer epoch seen from anyone.</summary>

@@ -391,7 +391,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             queueEvent.Partition,
             queueEvent.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
             ct).ConfigureAwait(false);
-        await replicator.WaitForQuorumAsync(topic, queueEvent.Partition, offset, ct).ConfigureAwait(false);
+        await replicator.WaitForQuorumAsync(topic, queueEvent.Partition, offset, null, ct).ConfigureAwait(false);
     }
 
     private static async ValueTask PersistGroupStateAsync(string topic, string queue, ConsumerGroupState group, CancellationToken ct)

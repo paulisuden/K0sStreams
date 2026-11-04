@@ -486,7 +486,7 @@ public sealed class QueueEngineTests : IDisposable
 /// <summary>Un líder que perdió el liderazgo mientras esperaba el quórum.</summary>
 internal sealed class NotLeaderReplicator : IReplicator
 {
-    public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default) =>
+    public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, TimeSpan? timeout = null, CancellationToken ct = default) =>
         ValueTask.FromException(new NotLeaderException("Otro broker es el líder."));
 }
 

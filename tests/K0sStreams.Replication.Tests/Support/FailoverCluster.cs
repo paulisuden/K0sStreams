@@ -163,7 +163,7 @@ internal sealed class FailoverCluster : IAsyncDisposable
 
     public async Task ConfirmAsync(int broker, long offset)
     {
-        var wait = _brokers[broker].Replicator.WaitForQuorumAsync(Topic, 0, offset).AsTask();
+        var wait = _brokers[broker].Replicator.WaitForQuorumAsync(Topic, 0, offset, null).AsTask();
         await Time.EventuallyAsync(() => wait.IsCompleted, $"offset {offset} to be confirmed by broker-{broker}");
         await wait;
     }

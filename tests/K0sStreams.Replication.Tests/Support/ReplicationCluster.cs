@@ -69,7 +69,7 @@ internal sealed class ReplicationCluster : IAsyncDisposable
             Topic, 0, Record.NewMessage(Leader.Cluster.CurrentEpoch, 0, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value)));
 
     public Task WaitAsync(long offset, CancellationToken ct = default) =>
-        Replicator.WaitForQuorumAsync(Topic, 0, offset, ct).AsTask();
+        Replicator.WaitForQuorumAsync(Topic, 0, offset, null, ct).AsTask();
 
     /// <summary>Waits until the write at <paramref name="offset"/> is confirmed, letting fake time move meanwhile.</summary>
     public async Task ConfirmAsync(long offset)

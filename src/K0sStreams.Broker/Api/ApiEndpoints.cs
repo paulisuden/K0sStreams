@@ -1,7 +1,6 @@
 using System.Text;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Api;
-
 namespace K0sStreams.Broker.Api;
 
 internal static class ApiEndpoints
@@ -114,7 +113,16 @@ internal static class ApiEndpoints
 
         // Solo el líder escribe. La replicación sube el high watermark cuando hay quórum.
         long offset = await log.AppendAsync(topic, partition, record, ct).ConfigureAwait(false);
-        await replicator.WaitForQuorumAsync(topic, partition, offset, ct).ConfigureAwait(false);
+        try
+        {
+            // 5 s de espera: si ambos seguidores están caídos, no se bloquea para siempre.
+            await replicator.WaitForQuorumAsync(topic, partition, offset, TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+        }
+        catch (QuorumLostException)
+        {
+            // Seguimos siendo líder, pero no hay suficientes seguidores para confirmar.
+            return Results.Problem("No se alcanzó el quórum para confirmar la escritura; reintentar.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
 
         return Results.Ok(new PublishResponse(partition, offset));
     }
