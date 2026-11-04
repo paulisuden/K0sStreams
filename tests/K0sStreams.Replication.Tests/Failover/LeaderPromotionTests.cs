@@ -24,7 +24,7 @@ public class LeaderPromotionTests
         await cluster.ElectAsync(2, 2);
 
         (await EpochsAsync(cluster.Brokers[2].Log)).Should().Equal(1, 1, 1, 2);
-        await cluster.EventuallyAsync(() => cluster.Brokers[1].Log.HighWatermark(Topic) == 3, "broker-1 to confirm the epoch change");
+        await cluster.EventuallyAsync(() => cluster.Brokers[1].Log.HighWatermark(Topic, 0) == 3, "broker-1 to confirm the epoch change");
         (await EpochsAsync(cluster.Brokers[1].Log)).Should().Equal(1, 1, 1, 2);
         await cluster.ConfirmAsync(2, await cluster.WriteAsync(2));
     }
@@ -41,7 +41,7 @@ public class LeaderPromotionTests
 
         await cluster.ElectAsync(1, 2);
 
-        await cluster.EventuallyAsync(() => cluster.Brokers[1].Log.HighWatermark(Topic) == 3, "the epoch change, and 2 with it, to be confirmed");
+        await cluster.EventuallyAsync(() => cluster.Brokers[1].Log.HighWatermark(Topic, 0) == 3, "the epoch change, and 2 with it, to be confirmed");
         (await EpochsAsync(cluster.Brokers[1].Log)).Should().Equal(1, 1, 1, 2);
         (await EpochsAsync(cluster.Brokers[2].Log)).Should().Equal(1, 1, 1, 2);
     }
@@ -58,7 +58,7 @@ public class LeaderPromotionTests
 
         cluster.Heal(0);
 
-        await cluster.EventuallyAsync(() => cluster.Brokers[0].Log.HighWatermark(Topic) == 3, "broker-0 to follow the new leader");
+        await cluster.EventuallyAsync(() => cluster.Brokers[0].Log.HighWatermark(Topic, 0) == 3, "broker-0 to follow the new leader");
         (await EpochsAsync(cluster.Brokers[0].Log)).Should().Equal(1, 1, 1, 2);
     }
 
@@ -74,11 +74,11 @@ public class LeaderPromotionTests
         cluster.Heal(0); // it comes back still believing it leads epoch 1
 
         long offset = await cluster.WriteAsync(0, "from the old leader");
-        var wait = cluster.Brokers[0].Replicator.WaitForQuorumAsync(Topic, 0, offset).AsTask();
+        var wait = cluster.Brokers[0].Replicator.WaitForQuorumAsync(Topic, 0, offset, null).AsTask();
 
         await cluster.EventuallyAsync(() => wait.IsCompleted, "the old leader's write to end");
         await FluentActions.Awaiting(() => wait).Should().ThrowAsync<NotLeaderException>();
-        (await cluster.Brokers[1].Log.ReadAsync(Topic, 1, 10).ToListAsync()).Should().OnlyContain(record => record.Epoch == 2);
+        (await cluster.Brokers[1].Log.ReadAsync(Topic, 0, 1, 10).ToListAsync()).Should().OnlyContain(record => record.Epoch == 2);
     }
 
     [Fact]
@@ -96,7 +96,7 @@ public class LeaderPromotionTests
         long offset = await cluster.WriteAsync(2);
         await cluster.ConfirmAsync(2, offset);
 
-        await cluster.EventuallyAsync(() => cluster.Brokers[0].Log.HighWatermark(Topic) == offset, "broker-0 to follow the new leader");
+        await cluster.EventuallyAsync(() => cluster.Brokers[0].Log.HighWatermark(Topic, 0) == offset, "broker-0 to follow the new leader");
     }
 
     [Fact]
@@ -120,7 +120,7 @@ public class LeaderPromotionTests
 
         await cluster.ElectAsync(2, 2);
 
-        cluster.Brokers[2].Log.EndOffset("ghost").Should().Be(-1);
+        cluster.Brokers[2].Log.EndOffset("ghost", 0).Should().Be(-1);
     }
 
     [Fact]
@@ -184,7 +184,7 @@ public class LeaderPromotionTests
 
         await cluster.ElectAsync(0, 3); // ...and won it again, at a later epoch
 
-        await cluster.EventuallyAsync(() => cluster.Brokers.All(broker => broker.Log.HighWatermark(Topic) == 3), "every broker to confirm the epoch change");
+        await cluster.EventuallyAsync(() => cluster.Brokers.All(broker => broker.Log.HighWatermark(Topic, 0) == 3), "every broker to confirm the epoch change");
         foreach (var broker in cluster.Brokers)
         {
             (await EpochsAsync(broker.Log)).Should().Equal(1, 1, 1, 3);

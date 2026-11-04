@@ -325,6 +325,10 @@ sequenceDiagram
 
 **Where.** `AppendHandler.HasRecordAsync`.
 
+**The other half: the follower pulls.** The push above needs a live `PeerReplicator` for that partition, and those loops start on a write or on a promotion. A pod that restarts has no way to announce itself, so with no push coming it would serve a log that is behind the leader indefinitely. So every `CatchUpInterval` the follower asks the leader `GetState` for each partition and, where the leader is ahead, copies the gap with `Fetch` and appends it through its own `Append` handling. Same gates as a push, and idempotent, so both paths can run at once.
+
+**Where.** `FollowerCatchUp`.
+
 ---
 
 ## 5. The follower's history differs just before the batch

@@ -481,6 +481,9 @@ $RECYCLE.BIN/
 # Vim temporary swap files
 *.swp
 
+# OpenCode skills (project-local installs)
+.agents/
+
 # Plan de trabajo personal (no se comparte)
 docs/plan-almacenamiento.md
 docs/almacenamiento-proceso.md

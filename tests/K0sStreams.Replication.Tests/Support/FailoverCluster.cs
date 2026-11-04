@@ -4,7 +4,9 @@ using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Failover;
 using K0sStreams.Replication.Leader;
 using K0sStreams.Replication.Network;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using static K0sStreams.Replication.Tests.Support.TestRecords;
 using Record = K0sStreams.Contracts.Record;
@@ -18,15 +20,19 @@ internal sealed class FailoverBroker : IAsyncDisposable
     {
         Node = node;
         var wrapped = Microsoft.Extensions.Options.Options.Create(options);
+        var catalogServices = new ServiceCollection();
+        catalogServices.AddSingleton<ITopicCatalog>(node.Catalog);
+        var catalogProvider = catalogServices.BuildServiceProvider();
         Replicator = new QuorumReplicator(
-            node.Log, node.Cluster, node.Epochs, node.KnownTopics, peers, wrapped, time, NullLogger<QuorumReplicator>.Instance);
-        Survey = new PeerSurvey(node.Node, node.Cluster, peers, new MajorityCall(wrapped, time), node.Epochs);
+            node.Log, node.Cluster, node.Epochs, catalogProvider, node.KnownTopics, peers, wrapped, time,
+            NullLogger<QuorumReplicator>.Instance);
+        Survey = new PeerSurvey(node.Node, node.Cluster, node.Catalog, peers, new MajorityCall(wrapped, time), node.Epochs);
         Promotion = new LeaderPromotion(
             node.Cluster,
             node.Epochs,
             Survey,
-            new LogCatchUp(node.Log, node.Node, node.Cluster, wrapped, time),
-            new EpochChangeWriter(node.Log, node.Node, node.Cluster, time),
+            new LogCatchUp(node.Log, node.Node, node.Cluster, node.Catalog, wrapped, time),
+            new EpochChangeWriter(node.Log, node.Node, node.Cluster, node.Catalog, time),
             wrapped,
             time,
             NullLogger<LeaderPromotion>.Instance);
@@ -139,9 +145,11 @@ internal sealed class FailoverCluster : IAsyncDisposable
         var node = _brokers[broker].Node;
         await TestRecords.SeedAsync(node.Log, epochs);
         node.KnownTopics.Add(Topic);
+        // Create topic in catalog with 1 partition (tests only use partition 0)
+        await node.Catalog.CreateAsync(new TopicConfig(Topic, 1, 3, TimeSpan.FromSeconds(5)), CancellationToken.None);
         if (highWatermark >= 0)
         {
-            node.Log.AdvanceHighWatermark(Topic, highWatermark);
+            node.Log.AdvanceHighWatermark(Topic, 0, highWatermark);
         }
     }
 
@@ -150,12 +158,12 @@ internal sealed class FailoverCluster : IAsyncDisposable
     {
         var node = _brokers[broker];
         return await node.Log.AppendAsync(
-            Topic, Record.NewMessage(node.Cluster.CurrentEpoch, 0, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value)));
+            Topic, 0, Record.NewMessage(node.Cluster.CurrentEpoch, 0, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value)));
     }
 
     public async Task ConfirmAsync(int broker, long offset)
     {
-        var wait = _brokers[broker].Replicator.WaitForQuorumAsync(Topic, 0, offset).AsTask();
+        var wait = _brokers[broker].Replicator.WaitForQuorumAsync(Topic, 0, offset, null).AsTask();
         await Time.EventuallyAsync(() => wait.IsCompleted, $"offset {offset} to be confirmed by broker-{broker}");
         await wait;
     }

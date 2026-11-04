@@ -71,12 +71,18 @@ public sealed class QueueEngineTests : IDisposable
         (await _catalog.CreateAsync(new TopicConfig(topic, partitions, maxRetries, retryBackoff ?? TimeSpan.FromSeconds(5)))).Should().BeTrue();
     }
 
+    private async ValueTask<ConsumerAssignment> JoinGroupAsync(string topic = "pedidos", string queue = "facturacion", string consumerId = "consumer-1")
+    {
+        return await _engine.JoinGroupAsync(topic, queue, consumerId);
+    }
+
     [Fact]
     public async Task Receive_sin_mensajes_devuelve_null()
     {
         await CreateTopicAsync();
+        await JoinGroupAsync();
 
-        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+        (await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30))).Should().BeNull();
     }
 
     [Fact]
@@ -84,8 +90,9 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a", "b", "c");
+        await JoinGroupAsync();
 
-        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         delivery.Should().NotBeNull();
         delivery!.Partition.Should().Be(0);
@@ -99,17 +106,18 @@ public sealed class QueueEngineTests : IDisposable
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
         var visibleUntil = Epoch.AddSeconds(30);
+        await JoinGroupAsync();
 
-        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         var records = await ReadAllAsync("pedidos", 0);
         records.Should().HaveCount(2);
         records[1].Type.Should().Be(RecordType.Receive);
-        var queueEvent = QueueEvent.FromRecord(records[1]);
-        queueEvent.Queue.Should().Be("facturacion");
-        queueEvent.Partition.Should().Be(delivery!.Partition);
-        queueEvent.TargetOffset.Should().Be(delivery.Offset);
-        queueEvent.UntilMs.Should().Be(visibleUntil.ToUnixTimeMilliseconds());
+        var queueEvent = QueueEvent.DesdeRegistro(records[1]);
+        queueEvent.Cola.Should().Be("facturacion");
+        queueEvent.Particion.Should().Be(delivery!.Partition);
+        queueEvent.OffsetObjetivo.Should().Be(delivery.Offset);
+        queueEvent.HastaMs.Should().Be(visibleUntil.ToUnixTimeMilliseconds());
     }
 
     [Fact]
@@ -117,11 +125,12 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a", "b");
-        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         (await _engine.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset)).Should().BeTrue();
 
-        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
+        (await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
     }
 
     [Fact]
@@ -129,10 +138,11 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
+        await JoinGroupAsync();
 
         var deliveries = await Task.WhenAll(
-            _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)).AsTask(),
-            _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)).AsTask());
+            _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)).AsTask(),
+            _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)).AsTask());
 
         deliveries.Count(delivery => delivery is not null).Should().Be(1);
     }
@@ -142,6 +152,7 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
+        await JoinGroupAsync();
 
         (await _engine.AckAsync("pedidos", "facturacion", 0, 0)).Should().BeFalse();
     }
@@ -151,10 +162,11 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
-        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         (await _engine.AckAsync("pedidos", "envio", delivery!.Partition, delivery.Offset)).Should().BeFalse();
-        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+        (await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30))).Should().BeNull();
     }
 
     [Fact]
@@ -162,9 +174,11 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
+        await JoinGroupAsync(queue: "facturacion");
+        await JoinGroupAsync(queue: "envio", consumerId: "consumer-2");
 
-        var facturacion = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
-        var envio = await _engine.ReceiveAsync("pedidos", "envio", TimeSpan.FromSeconds(30));
+        var facturacion = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
+        var envio = await _engine.ReceiveAsync("pedidos", "envio", "consumer-2", TimeSpan.FromSeconds(30));
 
         facturacion.Should().NotBeNull();
         envio.Should().NotBeNull();
@@ -177,9 +191,10 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a", "b");
+        await JoinGroupAsync();
 
-        var first = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
-        var second = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var first = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
+        var second = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         first!.Offset.Should().Be(0);
         second!.Offset.Should().Be(1);
@@ -190,13 +205,14 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
-        await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
-        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+        (await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30))).Should().BeNull();
 
         _time.Advance(TimeSpan.FromSeconds(31));
 
-        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
+        (await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
     }
 
     [Fact]
@@ -204,11 +220,12 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
-        var first = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        var first = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         first!.Attempt.Should().Be(1);
 
         _time.Advance(TimeSpan.FromSeconds(31));
-        var second = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var second = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         second!.Attempt.Should().Be(2);
     }
@@ -218,14 +235,15 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync("pedidos", 1, 3, TimeSpan.FromSeconds(1));
         await AppendMessagesAsync("pedidos", 0, "a");
-        var first = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        var first = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         first!.Attempt.Should().Be(1);
 
         (await _engine.NackAsync("pedidos", "facturacion", 0, first.Offset, "fallo")).Should().BeTrue();
-        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+        (await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30))).Should().BeNull();
 
         _time.Advance(TimeSpan.FromSeconds(2));
-        var second = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var second = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         second!.Attempt.Should().Be(2);
     }
 
@@ -234,11 +252,12 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync("pedidos", 1, 1, TimeSpan.FromSeconds(1));
         await AppendMessagesAsync("pedidos", 0, "a");
-        var first = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        var first = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         (await _engine.NackAsync("pedidos", "facturacion", 0, first!.Offset, "fallo")).Should().BeTrue();
 
         _time.Advance(TimeSpan.FromSeconds(2));
-        var second = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var second = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         (await _engine.NackAsync("pedidos", "facturacion", 0, second!.Offset, "fallo2")).Should().BeTrue();
 
         var dlq = _engine.GetDeadLetters("pedidos", "facturacion");
@@ -253,11 +272,12 @@ public sealed class QueueEngineTests : IDisposable
         await CreateTopicAsync("pedidos", 1, 3, TimeSpan.FromSeconds(1));
         long future = Epoch.AddSeconds(60).ToUnixTimeMilliseconds();
         await AppendScheduledAsync("pedidos", 0, future, "a");
+        await JoinGroupAsync();
 
-        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+        (await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30))).Should().BeNull();
 
         _time.Advance(TimeSpan.FromSeconds(61));
-        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         delivery.Should().NotBeNull();
         delivery!.Offset.Should().Be(0);
     }
@@ -267,8 +287,9 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
+        await JoinGroupAsync();
 
-        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         await _engine.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset);
 
         // Offsets: 0 el mensaje, 1 el receive, 2 el ack. El high watermark solo llega a 2 si el ack tuvo quórum.
@@ -280,9 +301,11 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
+        await JoinGroupAsync();
         var engine = new QueueEngine(_log, _catalog, _cluster, new NotLeaderReplicator(), _time);
+        await engine.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
 
-        var receive = async () => await engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var receive = async () => await engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         await receive.Should().ThrowAsync<NotLeaderException>();
     }
@@ -293,17 +316,19 @@ public sealed class QueueEngineTests : IDisposable
         // Como un broker que se reinicia: la memoria arranca vacía y el log tiene todo.
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a", "b", "c");
-        await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
-        var b = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
+        var b = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         await _engine.AckAsync("pedidos", "facturacion", b!.Partition, b.Offset);
 
         using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
 
         // a sigue en proceso y b está confirmado: lo próximo es c.
-        (await restarted.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(2);
+        (await restarted.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(2);
 
         _time.Advance(TimeSpan.FromSeconds(31));
-        var again = await restarted.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        var again = await restarted.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         again!.Offset.Should().Be(0);
         again.Attempt.Should().Be(2);
     }
@@ -313,12 +338,15 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
+        await JoinGroupAsync();
         var cluster = new ChangingClusterState();
         using var engine = new QueueEngine(_log, _catalog, cluster, _replicator, _time);
-        var delivery = await engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await engine.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        var delivery = await engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         // Otro broker lidera la época 2 y confirma el mensaje. El log compartido hace de replicación.
         using var otherLeader = new QueueEngine(_log, _catalog, new ChangingClusterState { CurrentEpoch = 2 }, _replicator, _time);
+        await otherLeader.JoinGroupAsync("pedidos", "facturacion", "consumer-2");
         (await otherLeader.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset)).Should().BeTrue();
 
         // Este broker vuelve a liderar en la época 3. Sin releer, creería que el mensaje sigue en proceso y lo
@@ -326,7 +354,7 @@ public sealed class QueueEngineTests : IDisposable
         cluster.CurrentEpoch = 3;
         _time.Advance(TimeSpan.FromSeconds(31));
 
-        (await engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+        (await engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30))).Should().BeNull();
     }
 
     [Fact]
@@ -334,10 +362,12 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync(maxRetries: 0);
         await AppendMessagesAsync("pedidos", 0, "a");
-        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         await _engine.NackAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset, "rompe");
 
         using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
 
         restarted.GetDeadLetters("pedidos", "facturacion").Should().ContainSingle().Which.Offset.Should().Be(0);
     }
@@ -347,12 +377,14 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
-        await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         _time.Advance(TimeSpan.FromSeconds(31));
 
         using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
         var deliveries = await Task.WhenAll(Enumerable.Range(0, 8).Select(
-            _ => restarted.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)).AsTask()));
+            _ => restarted.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)).AsTask()));
 
         // Si se releyera dos veces, el receive anterior contaría doble y este sería el intento 3.
         deliveries.Should().ContainSingle(delivery => delivery != null).Which!.Attempt.Should().Be(2);
@@ -363,13 +395,14 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a", "b", "c");
-        await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
-        (await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
+        await JoinGroupAsync();
+        await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
+        (await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
 
         var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
-            if (QueueEvent.IsQueueEvent(record.Type))
+            if (QueueEvent.EsEventoDeCola(record.Type))
             {
                 recovered.Apply("pedidos", record);
             }
@@ -377,7 +410,8 @@ public sealed class QueueEngineTests : IDisposable
 
         // a y b quedaron en proceso, así que el líder nuevo no puede volver a entregarlos:
         // c es el primer mensaje que sigue disponible.
-        (await recovered.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(2);
+        await recovered.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        (await recovered.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(2);
     }
 
     [Fact]
@@ -385,13 +419,14 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
+        await JoinGroupAsync();
 
-        await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
 
         var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
-            if (QueueEvent.IsQueueEvent(record.Type))
+            if (QueueEvent.EsEventoDeCola(record.Type))
             {
                 recovered.Apply("pedidos", record);
             }
@@ -399,11 +434,12 @@ public sealed class QueueEngineTests : IDisposable
 
         // Si el plazo no se reconstruyera desde el log, el mensaje volvería a entregarse
         // de inmediato en vez de esperar a que venza el visibility timeout del líder anterior.
-        (await recovered.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+        await recovered.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        (await recovered.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30))).Should().BeNull();
 
         _time.Advance(TimeSpan.FromSeconds(31));
 
-        (await recovered.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
+        (await recovered.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
     }
 
     [Fact]
@@ -411,20 +447,22 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a", "b");
-        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30));
+        await JoinGroupAsync();
+        var delivery = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
         await _engine.AckAsync("pedidos", "facturacion", delivery!.Partition, delivery.Offset);
 
         var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
         {
-            if (QueueEvent.IsQueueEvent(record.Type))
+            if (QueueEvent.EsEventoDeCola(record.Type))
             {
                 recovered.Apply("pedidos", record);
             }
         }
 
-        (await recovered.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
-        (await recovered.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30))).Should().BeNull();
+        await recovered.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        (await recovered.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
+        (await recovered.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30))).Should().BeNull();
     }
 
     [Fact]
@@ -432,6 +470,7 @@ public sealed class QueueEngineTests : IDisposable
     {
         await CreateTopicAsync();
         await AppendMessagesAsync("pedidos", 0, "a");
+        await JoinGroupAsync();
 
         var recovered = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
         foreach (var record in await ReadAllAsync("pedidos", 0))
@@ -439,14 +478,74 @@ public sealed class QueueEngineTests : IDisposable
             recovered.Apply("pedidos", record);
         }
 
-        (await recovered.ReceiveAsync("pedidos", "facturacion", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
+        await recovered.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        (await recovered.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task CommitOffsets_escribe_evento_en_el_log_y_no_entrega_de_nuevo_despues_de_reinicio()
+    {
+        await CreateTopicAsync();
+        await AppendMessagesAsync("pedidos", 0, "a", "b", "c");
+        await JoinGroupAsync();
+
+        // Recibir y confirmar el offset 0
+        var d1 = await _engine.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30));
+        d1.Should().NotBeNull();
+        await _engine.CommitOffsetsAsync("pedidos", "facturacion", "consumer-1", new Dictionary<int, long> { [0] = 0 });
+
+        // Verificar que el evento de confirmación está en el log
+        var records = await ReadAllAsync("pedidos", 0);
+        records.Should().Contain(r => r.Type == RecordType.OffsetCommit);
+
+        // Reiniciar el motor: el offset 0 ya no debería entregarse
+        using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        (await restarted.ReceiveAsync("pedidos", "facturacion", "consumer-1", TimeSpan.FromSeconds(30)))!.Offset.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task PersistGroupState_escribe_evento_de_grupo_en_el_log()
+    {
+        await CreateTopicAsync();
+        await JoinGroupAsync();
+
+        // Forzar persistencia del estado del grupo mediante un heartbeat
+        await _engine.HeartbeatAsync("pedidos", "facturacion", "consumer-1");
+
+        var records = await ReadAllAsync("pedidos", 0);
+        records.Should().Contain(r => r.Type == RecordType.GroupState);
+    }
+
+    [Fact]
+    public async Task Estado_del_grupo_sobrevive_a_un_reinicio()
+    {
+        await CreateTopicAsync(partitions: 2);
+        await AppendMessagesAsync("pedidos", 0, "a");
+        await AppendMessagesAsync("pedidos", 1, "b");
+
+        // Dos consumidores se unen y se reparten las particiones
+        await _engine.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        await _engine.JoinGroupAsync("pedidos", "facturacion", "consumer-2");
+        await _engine.HeartbeatAsync("pedidos", "facturacion", "consumer-1");
+        await _engine.HeartbeatAsync("pedidos", "facturacion", "consumer-2");
+
+        // Reiniciar: el estado del grupo debe recuperarse del log
+        using var restarted = new QueueEngine(_log, _catalog, _cluster, _replicator, _time);
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-1");
+        await restarted.JoinGroupAsync("pedidos", "facturacion", "consumer-2");
+
+        var states = restarted.GetConsumerStates("pedidos", "facturacion");
+        states.Should().HaveCount(2);
+        states.Should().Contain(s => s.ConsumerId == "consumer-1");
+        states.Should().Contain(s => s.ConsumerId == "consumer-2");
     }
 }
 
 /// <summary>Un líder que perdió el liderazgo mientras esperaba el quórum.</summary>
 internal sealed class NotLeaderReplicator : IReplicator
 {
-    public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default) =>
+    public ValueTask WaitForQuorumAsync(string topic, int partition, long offset, TimeSpan? timeout = null, CancellationToken ct = default) =>
         ValueTask.FromException(new NotLeaderException("Otro broker es el líder."));
 }
 

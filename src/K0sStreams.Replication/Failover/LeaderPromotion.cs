@@ -66,30 +66,108 @@ internal sealed partial class LeaderPromotion(
         var backoff = new Backoff(options.Value, time);
         while (true)
         {
-            var best = PeerSurvey.MostComplete(await survey.SurveyAsync(topic, epoch, ct).ConfigureAwait(false));
-            if (best.Tip.IsEmpty)
+            var answers = await survey.SurveyAsync(topic, epoch, ct).ConfigureAwait(false);
+            if (answers.Count == 0)
             {
                 // No broker has a record of this topic: there's nothing to lead.
                 return;
             }
 
-            if (best.NodeId == cluster.NodeId || await TryCatchUpAsync(topic, epoch, best, ct).ConfigureAwait(false))
+            // Check if any partition has data to promote
+            bool anyData = false;
+            for (int i = 0; i < answers.Count; i++)
             {
-                await epochChange.WriteAsync(topic, epoch, ct).ConfigureAwait(false);
+                var tips = answers[i].PartitionTips;
+                for (int j = 0; j < tips.Count; j++)
+                {
+                    if (!tips[j].Tip.IsEmpty)
+                    {
+                        anyData = true;
+                        break;
+                    }
+                }
+                if (anyData)
+                {
+                    break;
+                }
+            }
+            if (!anyData)
+            {
                 return;
             }
 
-            await backoff.WaitAsync(ct).ConfigureAwait(false);
+            // Try to catch up each partition from its best source
+            bool allCaughtUp = true;
+            int partitionCount = answers[0].PartitionTips.Count;
+            for (int partition = 0; partition < partitionCount; partition++)
+            {
+                var bestTip = PeerSurvey.MostCompleteForPartition(answers, partition);
+                if (bestTip.Tip.IsEmpty)
+                {
+                    // No data for this partition
+                    continue;
+                }
+
+                SurveyAnswer? bestSource = null;
+                for (int i = 0; i < answers.Count; i++)
+                {
+                    var tips = answers[i].PartitionTips;
+                    for (int j = 0; j < tips.Count; j++)
+                    {
+                        if (tips[j].Partition == partition && tips[j].Tip == bestTip.Tip)
+                        {
+                            bestSource = answers[i];
+                            break;
+                        }
+                    }
+                    if (bestSource != null)
+                    {
+                        break;
+                    }
+                }
+
+                if (bestSource != null && bestSource.NodeId != cluster.NodeId)
+                {
+                    var caughtUp = await TryCatchUpPartitionAsync(topic, epoch, bestSource, partition, ct).ConfigureAwait(false);
+                    if (!caughtUp)
+                    {
+                        allCaughtUp = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!allCaughtUp)
+            {
+                await backoff.WaitAsync(ct).ConfigureAwait(false);
+                continue;
+            }
+
+            // All partitions caught up, write epoch change to all
+            await epochChange.WriteAsync(topic, epoch, ct).ConfigureAwait(false);
+            return;
         }
     }
 
     /// <summary>False if the copy has to start over from a new survey: the source failed or its log changed.</summary>
-    private async Task<bool> TryCatchUpAsync(string topic, long epoch, SurveyAnswer source, CancellationToken ct)
+    private async Task<bool> TryCatchUpPartitionAsync(string topic, long epoch, SurveyAnswer source, int partition, CancellationToken ct)
     {
-        LogCatchingUp(logger, topic, source.NodeId, source.Tip.EndOffset);
+        PartitionTip sourceTip = new(partition, LogTip.Empty);
+        var tips = source.PartitionTips;
+        for (int i = 0; i < tips.Count; i++)
+        {
+            if (tips[i].Partition == partition)
+            {
+                sourceTip = tips[i];
+                break;
+            }
+        }
+        LogCatchingUp(logger, topic, partition, source.NodeId, sourceTip.Tip.EndOffset);
         try
         {
-            return await catchUp.TryCopyAsync(topic, epoch, source, ct).ConfigureAwait(false);
+            // Create a survey answer list with just this source for the specific partition
+            var surveyAnswers = new List<SurveyAnswer> { source };
+            return await catchUp.TryCopyAsync(topic, epoch, surveyAnswers, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is RpcException or OperationCanceledException && !ct.IsCancellationRequested)
         {
@@ -104,9 +182,9 @@ internal sealed partial class LeaderPromotion(
     [LoggerMessage(Level = LogLevel.Information, Message = "Ready to lead epoch {Epoch}.")]
     private static partial void LogReady(ILogger logger, long epoch);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Copying {Topic} up to offset {EndOffset} from {Peer}, whose log is more complete.")]
-    private static partial void LogCatchingUp(ILogger logger, string topic, string peer, long endOffset);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Copying {topic} partition {partition} up to offset {endOffset} from {peer}, whose log is more complete.")]
+    private static partial void LogCatchingUp(ILogger logger, string topic, int partition, string peer, long endOffset);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Copying {Topic} from {Peer} failed; surveying again.")]
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Copying {topic} from {peer} failed; surveying again.")]
     private static partial void LogCatchUpFailed(ILogger logger, Exception exception, string topic, string peer);
 }

@@ -35,11 +35,11 @@ public sealed class RotationTests : IDisposable
         Record.NewMessage(1, 0, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes($"m{i:D2}"));
 
     private string Segmento(long baseOffset) =>
-        Path.Combine(_dataDir, Topico, baseOffset.ToString("D20", CultureInfo.InvariantCulture) + ".log");
+        Path.Combine(_dataDir, Topico, "partition-0", baseOffset.ToString("D20", CultureInfo.InvariantCulture) + ".log");
 
     /// <summary>Nombres de los segmentos que hay en disco, ordenados.</summary>
     private string[] SegmentosEnDisco() =>
-        [.. Directory.GetFiles(Path.Combine(_dataDir, Topico), "*.log").Select(Path.GetFileName).Order()!];
+        [.. Directory.GetFiles(Path.Combine(_dataDir, Topico, "partition-0"), "*.log").Select(Path.GetFileName).Order()!];
 
     private static async Task<SegmentedLog> Escribir(SegmentedLog log, int cuantos)
     {

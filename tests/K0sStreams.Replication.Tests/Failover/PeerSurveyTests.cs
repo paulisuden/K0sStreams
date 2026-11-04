@@ -37,13 +37,14 @@ public class PeerSurveyTests
 
         var answers = await SurveyAsync(cluster, surveyor: 2, epoch: 3);
 
-        answers.Select(answer => (answer.NodeId, answer.Tip)).Should().Equal(("broker-2", new LogTip(0, 1)), ("broker-1", new LogTip(2, 2)));
+        answers.Select(answer => (answer.NodeId, answer.PartitionTips[0].Tip)).Should().Equal(("broker-2", new LogTip(0, 1)), ("broker-1", new LogTip(2, 2)));
     }
 
     [Fact]
     public async Task A_broker_at_a_newer_epoch_makes_the_survey_fail()
     {
         await using var cluster = new FailoverCluster();
+        await cluster.SeedAsync(1, 0, 1); // topic must be in catalog for survey to work
         cluster.Isolate(0);
         cluster.Brokers[1].Cluster.ChangeEpoch(5, leader: false);
 
@@ -75,6 +76,7 @@ public class PeerSurveyTests
         var survey = new PeerSurvey(
             candidate.Node,
             candidate.Cluster,
+            candidate.Catalog,
             new Dictionary<string, IReplicationPeer> { ["broker-1"] = follower.Node },
             new MajorityCall(Options.Create(new ReplicationOptions()), new FakeTimeProvider()),
             candidate.Epochs);
@@ -86,7 +88,7 @@ public class PeerSurveyTests
         blocking.Release();
 
         (await fromOldLeader).Ok.Should().BeTrue();
-        (await answers).Single(answer => answer.NodeId == "broker-1").Tip.Should().Be(new LogTip(0, 1));
+        (await answers).Single(answer => answer.NodeId == "broker-1").PartitionTips[0].Tip.Should().Be(new LogTip(0, 1));
         (await follower.Node.AppendAsync(Append(1, 0, 1, -1))).Code.Should().Be(AppendError.StaleEpoch);
     }
 

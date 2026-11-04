@@ -60,6 +60,10 @@ internal sealed class ReplicationTestServer : IAsyncDisposable
             kestrel.Listen(IPAddress.Loopback, port, listen => listen.Protocols = HttpProtocols.Http2));
         builder.Services.AddSingleton<ILog>(log);
         builder.Services.AddSingleton<IClusterState>(cluster);
+
+        // En el broker real lo registra el almacenamiento; acá alcanza el de memoria, que es el que usa el catálogo
+        // para enumerar los tópicos que un seguidor tiene que ponerse al día.
+        builder.Services.AddSingleton<ITopicCatalog, InMemoryTopicCatalog>();
         builder.Services.AddK0sReplication(builder.Configuration);
 
         var app = builder.Build();

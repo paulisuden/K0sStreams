@@ -17,7 +17,7 @@ public sealed class SegmentedLogTests : IDisposable
     private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "k0sstreams-tests", Guid.NewGuid().ToString("N"));
     private readonly SegmentedLog _log;
 
-    public SegmentedLogTests() => _log = new SegmentedLog(_dataDir);
+    public SegmentedLogTests() => _log = new SegmentedLog(_dataDir, SegmentedLog.DefaultSegmentBytes, new RetentionOptions());
 
     // Dispose es el método de limpieza. xUnit lo llama cuando el test termina, pase o falle y borra la carpeta temporal
     public void Dispose()
@@ -48,11 +48,10 @@ public sealed class SegmentedLogTests : IDisposable
     }
 
     [Fact]
-    public void Una_particion_distinta_de_cero_se_rechaza()
+    public void Particion_negativa_se_rechaza()
     {
-        // DEC-001: un tópico es un único log. Mientras ILog siga llevando el parámetro,
-        // cualquier valor que no sea 0 se rechaza en vez de ignorarse en silencio.
-        _log.Invoking(l => l.EndOffset("t", 1)).Should().Throw<ArgumentOutOfRangeException>();
+        // Partitions must be non-negative
+        _log.Invoking(l => l.EndOffset("t", -1)).Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]

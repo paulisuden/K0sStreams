@@ -21,7 +21,10 @@ public sealed class LogCatchUpTests : IDisposable
     {
         // The promotion adopts the new epoch before copying anything.
         _self.Epochs.Observe(Epoch);
-        _catchUp = new LogCatchUp(_self.Log, _self.Node, _self.Cluster, Options.Create(new ReplicationOptions()), new FakeTimeProvider());
+        _catchUp = new LogCatchUp(_self.Log, _self.Node, _self.Cluster, _self.Catalog, Options.Create(new ReplicationOptions()), new FakeTimeProvider());
+        // Create topic in both catalogs
+        _self.Catalog.CreateAsync(new TopicConfig(Topic, 1, 3, TimeSpan.FromSeconds(5)), CancellationToken.None).AsTask().Wait();
+        _source.Catalog.CreateAsync(new TopicConfig(Topic, 1, 3, TimeSpan.FromSeconds(5)), CancellationToken.None).AsTask().Wait();
     }
 
     public void Dispose()
@@ -34,14 +37,14 @@ public sealed class LogCatchUpTests : IDisposable
     public async Task It_copies_what_comes_after_the_confirmed_prefix_and_adopts_the_sources_high_watermark()
     {
         await SeedAsync(_self.Log, 1, 1);
-        _self.Log.AdvanceHighWatermark(Topic, 1);
+        _self.Log.AdvanceHighWatermark(Topic, 0, 1);
         await SeedAsync(_source.Log, 1, 1, 1, 1);
-        _source.Log.AdvanceHighWatermark(Topic, 2);
+        _source.Log.AdvanceHighWatermark(Topic, 0, 2);
 
         (await CopyAsync(new LogTip(3, 1))).Should().BeTrue();
 
         (await EncodedAsync(_self.Log)).Should().Equal(await EncodedAsync(_source.Log));
-        _self.Log.HighWatermark(Topic).Should().Be(2);
+        _self.Log.HighWatermark(Topic, 0).Should().Be(2);
     }
 
     [Fact]
@@ -58,7 +61,7 @@ public sealed class LogCatchUpTests : IDisposable
     public async Task It_replaces_a_tail_that_was_never_confirmed()
     {
         await SeedAsync(_self.Log, 1, 1, 1); // 1 and 2 came from a leader that died before confirming them
-        _self.Log.AdvanceHighWatermark(Topic, 0);
+        _self.Log.AdvanceHighWatermark(Topic, 0, 0);
         await SeedAsync(_source.Log, 1, 2, 2, 2);
 
         (await CopyAsync(new LogTip(3, 2))).Should().BeTrue();
@@ -73,7 +76,7 @@ public sealed class LogCatchUpTests : IDisposable
 
         (await CopyAsync(new LogTip(1, 1))).Should().BeTrue();
 
-        _self.Log.EndOffset(Topic).Should().Be(1);
+        _self.Log.EndOffset(Topic, 0).Should().Be(1);
     }
 
     [Fact]
@@ -88,7 +91,7 @@ public sealed class LogCatchUpTests : IDisposable
     public async Task It_never_overwrites_a_confirmed_record()
     {
         await SeedAsync(_self.Log, 1, 1);
-        _self.Log.AdvanceHighWatermark(Topic, 1);
+        _self.Log.AdvanceHighWatermark(Topic, 0, 1);
         await SeedAsync(_source.Log, 1, 2, 2); // disagrees on offset 1, which this broker counts as confirmed
 
         await FluentActions.Awaiting(() => CopyAsync(new LogTip(2, 2))).Should().ThrowAsync<InvalidOperationException>();
@@ -104,9 +107,9 @@ public sealed class LogCatchUpTests : IDisposable
 
         await FluentActions.Awaiting(() => CopyAsync(new LogTip(1, 1))).Should().ThrowAsync<NotLeaderException>();
 
-        _self.Log.EndOffset(Topic).Should().Be(-1);
+        _self.Log.EndOffset(Topic, 0).Should().Be(-1);
     }
 
     private Task<bool> CopyAsync(LogTip surveyed) =>
-        _catchUp.TryCopyAsync(Topic, Epoch, new SurveyAnswer("broker-1", _source.Node, surveyed), CancellationToken.None);
+        _catchUp.TryCopyAsync(Topic, Epoch, [new SurveyAnswer("broker-1", _source.Node, [new PartitionTip(0, surveyed)])], CancellationToken.None);
 }

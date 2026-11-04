@@ -1,0 +1,156 @@
+# Broker en Kubernetes para otel-demo-k0sstreams
+# 3 réplicas con PVC cada una, Service headless entre brokers y LoadBalancer para clientes.
+# Líder se elige con Lease "k0sstreams-leader" en este namespace.
+
+# Headless Service: DNS estable por pod (broker-0.broker.otel-demo-k0sstreams.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker
+  namespace: otel-demo-k0sstreams
+  labels:
+    app: broker
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: broker
+  ports:
+    - name: http
+      port: 9090
+    - name: grpc
+      port: 9091
+---
+# LoadBalancer para clientes HTTP (puerto 9090)
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker-lb
+  namespace: otel-demo-k0sstreams
+  labels:
+    app: broker
+spec:
+  type: LoadBalancer
+  selector:
+    app: broker
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+---
+# ServiceAccount para elección de líder via Lease
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: broker
+  namespace: otel-demo-k0sstreams
+  labels:
+    app: broker
+---
+# Role: get/create/update leases para elección de líder
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: broker-leader-election
+  namespace: otel-demo-k0sstreams
+  labels:
+    app: broker
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+---
+# RoleBinding: ServiceAccount -> Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: broker-leader-election
+  namespace: otel-demo-k0sstreams
+  labels:
+    app: broker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: broker-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: broker
+    namespace: otel-demo-k0sstreams
+---
+# StatefulSet: 3 brokers con PVC
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: broker
+  namespace: otel-demo-k0sstreams
+  labels:
+    app: broker
+spec:
+  serviceName: broker
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: broker
+  template:
+    metadata:
+      labels:
+        app: broker
+    spec:
+      serviceAccountName: broker
+      securityContext:
+        fsGroup: 1654
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: broker
+      containers:
+        - name: broker
+          image: k0sstreams/broker:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: Broker__NodeId
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: Coordination__LeaderAddressFormat
+              value: http://{0}.broker.otel-demo-k0sstreams.svc.cluster.local:9090
+            - name: Replication__Peers__broker-0
+              value: http://broker-0.broker.otel-demo-k0sstreams.svc.cluster.local:9091
+            - name: Replication__Peers__broker-1
+              value: http://broker-1.broker.otel-demo-k0sstreams.svc.cluster.local:9091
+            - name: Replication__Peers__broker-2
+              value: http://broker-2.broker.otel-demo-k0sstreams.svc.cluster.local:9091
+            - name: K0sStreams__InvariantGlobalization
+              value: "true"
+          ports:
+            - name: http
+              containerPort: 9090
+            - name: grpc
+              containerPort: 9091
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumeClaimTemplates:
+        - metadata:
+            name: data
+          spec:
+            accessModes: [ReadWriteOnce]
+            resources:
+              requests:
+                storage: 1Gi

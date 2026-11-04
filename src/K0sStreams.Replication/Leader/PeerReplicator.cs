@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 namespace K0sStreams.Replication.Leader;
 
 /// <summary>
-/// Leader side, one per follower and topic: sends the follower what it's missing with <c>Append</c>, steps back on a
+/// Leader side, one per follower and topic+partition: sends the follower what it's missing with <c>Append</c>, steps back on a
 /// mismatch, sends heartbeats when idle, and retries with backoff when the follower fails. One request in flight at a
 /// time, so a slow or dead follower never holds up the others. See docs/replication.md, sections 5.1 to 5.6.
 /// </summary>
@@ -65,7 +65,7 @@ internal sealed partial class PeerReplicator
                         return;
                     }
 
-                    long end = _owner.Log.EndOffset(_topic.Topic);
+                    long end = _owner.Log.EndOffset(_topic.Topic, _topic.Partition);
                     long hw = _topic.HighWatermark;
                     _next = Math.Min(_next, end + 1);
                     bool heartbeatDue = Interlocked.Exchange(ref _heartbeatDue, 0) == 1;
@@ -81,7 +81,7 @@ internal sealed partial class PeerReplicator
                     if (_failing)
                     {
                         _failing = false;
-                        LogRecovered(_owner.Logger, _peerId, _topic.Topic);
+                        LogRecovered(_owner.Logger, _peerId, _topic.Topic, _topic.Partition);
                     }
 
                     if (response.Code == AppendError.StaleEpoch || response.Epoch > _term.Epoch)
@@ -108,7 +108,7 @@ internal sealed partial class PeerReplicator
                     {
                         if (_topic.ReportMismatch(_index, response.EndOffset))
                         {
-                            LogFollowerLostRecords(_owner.Logger, _peerId, _topic.Topic, response.EndOffset);
+                            LogFollowerLostRecords(_owner.Logger, _peerId, _topic.Topic, _topic.Partition, response.EndOffset);
                         }
 
                         // Step back: to just after the follower's end if it's behind, or one record if the record before
@@ -119,7 +119,7 @@ internal sealed partial class PeerReplicator
                     }
                     else
                     {
-                        LogRejected(_owner.Logger, _peerId, _topic.Topic, response.Code, response.Error);
+                        LogRejected(_owner.Logger, _peerId, _topic.Topic, _topic.Partition, response.Code, response.Error);
                         probe = true;
                         await BackoffAsync().ConfigureAwait(false);
                     }
@@ -128,12 +128,12 @@ internal sealed partial class PeerReplicator
                 {
                     if (_failing)
                     {
-                        LogStillFailing(_owner.Logger, _peerId, _topic.Topic, ex.Message);
+                        LogStillFailing(_owner.Logger, _peerId, _topic.Topic, _topic.Partition, ex.Message);
                     }
                     else
                     {
                         _failing = true;
-                        LogFailing(_owner.Logger, ex, _peerId, _topic.Topic);
+                        LogFailing(_owner.Logger, ex, _peerId, _topic.Topic, _topic.Partition);
                     }
 
                     probe = true;
@@ -175,6 +175,7 @@ internal sealed partial class PeerReplicator
         {
             Epoch = _term.Epoch,
             Topic = _topic.Topic,
+            Partition = _topic.Partition,
             PrevOffset = prev,
             LeaderHw = highWatermark,
             LeaderId = _owner.NodeId,
@@ -184,13 +185,13 @@ internal sealed partial class PeerReplicator
         bool needPrevious = prev >= 0;
         int bytes = 0;
         int count = options.MaxBatchRecords + (needPrevious ? 1 : 0);
-        await foreach (var record in _owner.Log.ReadAsync(_topic.Topic, Math.Max(prev, 0), count, _ct).ConfigureAwait(false))
+        await foreach (var record in _owner.Log.ReadAsync(_topic.Topic, _topic.Partition, Math.Max(prev, 0), count, _ct).ConfigureAwait(false))
         {
             if (needPrevious)
             {
                 if (record.Offset != prev)
                 {
-                    throw new InvalidOperationException($"Read offset {record.Offset} from {_topic.Topic}; expected {prev}.");
+                    throw new InvalidOperationException($"Read offset {record.Offset} from {_topic.Topic} partition {_topic.Partition}; expected {prev}.");
                 }
 
                 request.PrevEpoch = record.Epoch;
@@ -213,26 +214,26 @@ internal sealed partial class PeerReplicator
 
         if (needPrevious)
         {
-            throw new InvalidOperationException($"Offset {prev} of {_topic.Topic} is missing from the leader's log.");
+            throw new InvalidOperationException($"Offset {prev} of {_topic.Topic} partition {_topic.Partition} is missing from the leader's log.");
         }
 
         return (request, lastEpoch);
     }
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Replicating {Topic} to {Peer} failed; retrying with backoff.")]
-    private static partial void LogFailing(ILogger logger, Exception exception, string peer, string topic);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Replicating {Topic} partition {Partition} to {Peer} failed; retrying with backoff.")]
+    private static partial void LogFailing(ILogger logger, Exception exception, string peer, string topic, int partition);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Replicating {Topic} to {Peer} still fails: {Reason}")]
-    private static partial void LogStillFailing(ILogger logger, string peer, string topic, string reason);
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Replicating {Topic} partition {Partition} to {Peer} still fails: {Reason}")]
+    private static partial void LogStillFailing(ILogger logger, string peer, string topic, int partition, string reason);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "{Peer} answers again for {Topic}.")]
-    private static partial void LogRecovered(ILogger logger, string peer, string topic);
+    [LoggerMessage(Level = LogLevel.Information, Message = "{Peer} answers again for {Topic} partition {Partition}.")]
+    private static partial void LogRecovered(ILogger logger, string peer, string topic, int partition);
 
-    [LoggerMessage(Level = LogLevel.Error, Message = "{Peer} rejected records of {Topic} with {Code}: {Error}")]
-    private static partial void LogRejected(ILogger logger, string peer, string topic, AppendError code, string error);
+    [LoggerMessage(Level = LogLevel.Error, Message = "{Peer} rejected records of {Topic} partition {Partition} with {Code}: {Error}")]
+    private static partial void LogRejected(ILogger logger, string peer, string topic, int partition, AppendError code, string error);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "{Peer} reports end offset {EndOffset} for {Topic}, below what it had confirmed: its log lost records.")]
-    private static partial void LogFollowerLostRecords(ILogger logger, string peer, string topic, long endOffset);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Peer} reports end offset {EndOffset} for {Topic} partition {Partition}, below what it had confirmed: its log lost records.")]
+    private static partial void LogFollowerLostRecords(ILogger logger, string peer, string topic, int partition, long endOffset);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "{Peer} is at epoch {PeerEpoch}, newer than this leader's {Epoch}: this broker was replaced as leader.")]
     private static partial void LogFenced(ILogger logger, string peer, long peerEpoch, long epoch);

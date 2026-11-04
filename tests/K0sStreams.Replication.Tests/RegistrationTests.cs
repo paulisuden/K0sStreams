@@ -67,6 +67,7 @@ public class RegistrationTests
             .AddLogging()
             .AddSingleton<ILog>(new InMemoryLog())
             .AddSingleton<IClusterState>(new ControllableClusterState("broker-1"))
+            .AddSingleton<ITopicCatalog, InMemoryTopicCatalog>()
             .AddK0sReplication(configuration)
             .BuildServiceProvider();
     }

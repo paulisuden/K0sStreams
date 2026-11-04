@@ -1,7 +1,6 @@
 using System.Text;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Api;
-
 namespace K0sStreams.Broker.Api;
 
 internal static class ApiEndpoints
@@ -19,9 +18,16 @@ internal static class ApiEndpoints
         topics.MapPost("/", CreateTopicAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapPost("/{topic}/messages", PublishAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapGet("/{topic}/partitions/{partition:int}/messages", ReadAsync);
+        
+        // Queue endpoints with consumer group support
+        topics.MapPost("/{topic}/queues/{queue}/join", JoinGroupAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/leave", LeaveGroupAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/heartbeat", HeartbeatAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapPost("/{topic}/queues/{queue}/receive", ReceiveAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapPost("/{topic}/queues/{queue}/ack/{partition:int}/{offset:long}", AckAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapPost("/{topic}/queues/{queue}/nack/{partition:int}/{offset:long}", NackAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/offsets", CommitOffsetsAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapGet("/{topic}/queues/{queue}/consumers", GetConsumerStatesAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapGet("/{topic}/queues/{queue}/dlq", GetDeadLettersAsync).AddEndpointFilter(LeaderOnlyAsync);
 
         return endpoints;
@@ -101,12 +107,22 @@ internal static class ApiEndpoints
         long deliverAt = request.DeliverAt?.ToUnixTimeMilliseconds() ?? 0;
         var record = Record.NewMessage(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds(), key, Encoding.UTF8.GetBytes(request.Value), deliverAt);
 
-        // Cada tópico es un solo log (DEC-001): todo va a la partición 0, la única que acepta la replicación.
-        const int partition = 0;
+        // Elige la partición por clave (CRC32 módulo particiones). Sin clave va a la partición 0.
+        TopicConfig topicConfig = catalog.Find(topic)!;
+        int partition = Partitioner.ForKey(key.Span, topicConfig.Partitions);
 
         // Solo el líder escribe. La replicación sube el high watermark cuando hay quórum.
         long offset = await log.AppendAsync(topic, partition, record, ct).ConfigureAwait(false);
-        await replicator.WaitForQuorumAsync(topic, partition, offset, ct).ConfigureAwait(false);
+        try
+        {
+            // 5 s de espera: si ambos seguidores están caídos, no se bloquea para siempre.
+            await replicator.WaitForQuorumAsync(topic, partition, offset, TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+        }
+        catch (QuorumLostException)
+        {
+            // Seguimos siendo líder, pero no hay suficientes seguidores para confirmar.
+            return Results.Problem("No se alcanzó el quórum para confirmar la escritura; reintentar.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
 
         return Results.Ok(new PublishResponse(partition, offset));
     }
@@ -166,14 +182,99 @@ internal static class ApiEndpoints
         return Results.Ok(new ReadResponse(messages, highWatermark, nextOffset));
     }
 
-    private static async Task<IResult> ReceiveAsync(
+    private static async Task<IResult> JoinGroupAsync(
         string topic,
         string queue,
-        ReceiveRequest? request,
+        JoinGroupRequest request,
         IQueueEngine engine,
         CancellationToken ct)
     {
-        int seconds = request?.VisibilitySeconds ?? DefaultVisibilitySeconds;
+        if (string.IsNullOrEmpty(request.ConsumerId))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(JoinGroupRequest.ConsumerId)] = ["ConsumerId es requerido."],
+            });
+        }
+
+        try
+        {
+            var assignment = await engine.JoinGroupAsync(topic, queue, request.ConsumerId, ct).ConfigureAwait(false);
+            return Results.Ok(new JoinGroupResponse(
+                assignment.ConsumerId,
+                assignment.Partitions,
+                assignment.Generation));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+    }
+
+    private static async Task<IResult> LeaveGroupAsync(
+        string topic,
+        string queue,
+        LeaveGroupRequest request,
+        IQueueEngine engine,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(request.ConsumerId))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(LeaveGroupRequest.ConsumerId)] = ["ConsumerId es requerido."],
+            });
+        }
+
+        await engine.LeaveGroupAsync(topic, queue, request.ConsumerId, ct).ConfigureAwait(false);
+        return Results.Ok(new { topic, queue, consumerId = request.ConsumerId });
+    }
+
+    private static async Task<IResult> HeartbeatAsync(
+        string topic,
+        string queue,
+        HeartbeatRequest request,
+        IQueueEngine engine,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(request.ConsumerId))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(HeartbeatRequest.ConsumerId)] = ["ConsumerId es requerido."],
+            });
+        }
+
+        try
+        {
+            var assignment = await engine.HeartbeatAsync(topic, queue, request.ConsumerId, ct).ConfigureAwait(false);
+            return Results.Ok(new HeartbeatResponse(
+                assignment.ConsumerId,
+                assignment.Partitions,
+                assignment.Generation));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+    }
+
+    private static async Task<IResult> ReceiveAsync(
+        string topic,
+        string queue,
+        ReceiveRequest request,
+        IQueueEngine engine,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(request.ConsumerId))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(ReceiveRequest.ConsumerId)] = ["ConsumerId es requerido."],
+            });
+        }
+
+        int seconds = request.VisibilitySeconds ?? DefaultVisibilitySeconds;
         if (seconds <= 0)
         {
             return Results.ValidationProblem(new Dictionary<string, string[]>
@@ -182,7 +283,7 @@ internal static class ApiEndpoints
             });
         }
 
-        Delivery? delivery = await engine.ReceiveAsync(topic, queue, TimeSpan.FromSeconds(seconds), ct).ConfigureAwait(false);
+        Delivery? delivery = await engine.ReceiveAsync(topic, queue, request.ConsumerId, TimeSpan.FromSeconds(seconds), ct).ConfigureAwait(false);
         if (delivery is null)
         {
             return Results.NoContent();
@@ -224,6 +325,54 @@ internal static class ApiEndpoints
         return nacked
             ? Results.Ok(new { topic, queue, partition, offset })
             : Results.NotFound(new { error = "El mensaje no estaba en proceso en esa cola." });
+    }
+
+    private static async Task<IResult> CommitOffsetsAsync(
+        string topic,
+        string queue,
+        CommitOffsetsRequest request,
+        IQueueEngine engine,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(request.ConsumerId))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(CommitOffsetsRequest.ConsumerId)] = ["ConsumerId es requerido."],
+            });
+        }
+
+        if (request.Offsets == null || request.Offsets.Count == 0)
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(CommitOffsetsRequest.Offsets)] = ["Al menos un offset es requerido."],
+            });
+        }
+
+        try
+        {
+            await engine.CommitOffsetsAsync(topic, queue, request.ConsumerId, request.Offsets, ct).ConfigureAwait(false);
+            return Results.Ok(new { topic, queue, consumerId = request.ConsumerId });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.NotFound(new { error = ex.Message });
+        }
+    }
+
+    private static async Task<IResult> GetConsumerStatesAsync(
+        string topic,
+        string queue,
+        IQueueEngine engine,
+        CancellationToken ct)
+    {
+        var states = engine.GetConsumerStates(topic, queue);
+        var response = states.Select(s => new ConsumerStateResponse(
+            s.ConsumerId,
+            s.LastHeartbeat,
+            s.AssignedPartitions)).ToArray();
+        return Results.Ok(response);
     }
 
     private static IResult GetDeadLettersAsync(

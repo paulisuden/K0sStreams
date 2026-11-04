@@ -18,10 +18,10 @@ internal sealed class LeaderTerm(long epoch) : IDisposable
 
     public bool IsStopped => _stopped;
 
-    /// <summary>Replication state per topic. Added to only under <see cref="QuorumReplicator"/>'s lock.</summary>
-    public ConcurrentDictionary<string, TopicReplication> Topics { get; } = new(StringComparer.Ordinal);
+    /// <summary>Replication state per topic+partition. Added to only under <see cref="QuorumReplicator"/>'s lock.</summary>
+    public ConcurrentDictionary<(string Topic, int Partition), TopicReplication> Topics { get; } = new();
 
-    /// <summary>One loop per follower and topic. Guarded by <see cref="QuorumReplicator"/>'s lock.</summary>
+    /// <summary>One loop per follower and topic+partition. Guarded by <see cref="QuorumReplicator"/>'s lock.</summary>
     public List<Task> Loops { get; } = [];
 
     public void MarkStopped() => _stopped = true;

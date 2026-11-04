@@ -33,6 +33,18 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<AppendHandler>();
         services.AddSingleton<ReplicationNode>();
         services.AddSingleton<PeerDirectory>();
+
+        // El seguidor que vuelve pide lo que le falta (Fetch); sin esto, un pod reiniciado sirve un log atrasado hasta
+        // que el líder tenga algo nuevo que empujar.
+        services.AddHostedService(sp => new FollowerCatchUp(
+            sp.GetRequiredService<ILog>(),
+            sp.GetRequiredService<ITopicCatalog>(),
+            sp.GetRequiredService<IClusterState>(),
+            sp.GetRequiredService<ReplicationNode>(),
+            sp.GetRequiredService<PeerDirectory>().Peers,
+            sp.GetRequiredService<IOptions<ReplicationOptions>>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetRequiredService<ILogger<FollowerCatchUp>>()));
         services.AddGrpc(options =>
         {
             options.MaxReceiveMessageSize = ReplicationOptions.MaxMessageSize;
@@ -44,6 +56,7 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<ILog>(),
             sp.GetRequiredService<IClusterState>(),
             sp.GetRequiredService<EpochTracker>(),
+            sp, // IServiceProvider: ITopicCatalog se resuelve perezosamente para romper la dependencia circular (LogTopicCatalog necesita IReplicator)
             sp.GetRequiredService<KnownTopics>(),
             sp.GetRequiredService<PeerDirectory>().Peers,
             sp.GetRequiredService<IOptions<ReplicationOptions>>(),
@@ -55,6 +68,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(sp => new PeerSurvey(
             sp.GetRequiredService<ReplicationNode>(),
             sp.GetRequiredService<IClusterState>(),
+            sp.GetRequiredService<ITopicCatalog>(),
             sp.GetRequiredService<PeerDirectory>().Peers,
             sp.GetRequiredService<MajorityCall>(),
             sp.GetRequiredService<EpochTracker>()));

@@ -14,10 +14,10 @@ public sealed class DiskLayoutTests : IDisposable
     private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "k0sstreams-tests", Guid.NewGuid().ToString("N"));
     private readonly SegmentedLog _log;
 
-    public DiskLayoutTests() => _log = new SegmentedLog(_dataDir);
+    public DiskLayoutTests() => _log = new SegmentedLog(_dataDir, SegmentedLog.DefaultSegmentBytes, new RetentionOptions());
 
-    /// <summary>Donde el log tiene que haber dejado el único segmento del tópico "pedidos" (DEC-001: sin particiones).</summary>
-    private string Segmento => Path.Combine(_dataDir, "pedidos", "00000000000000000000.log");
+    /// <summary>Donde el log tiene que haber dejado el único segmento del tópico "pedidos" partition 0.</summary>
+    private string Segmento => Path.Combine(_dataDir, "pedidos", "partition-0", "00000000000000000000.log");
 
     public void Dispose()
     {

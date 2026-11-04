@@ -16,7 +16,7 @@ public sealed class RecoveryTests : IDisposable
 
     private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "k0sstreams-tests", Guid.NewGuid().ToString("N"));
 
-    private string Segmento => Path.Combine(_dataDir, Topico, "00000000000000000000.log");
+    private string Segmento => Path.Combine(_dataDir, Topico, "partition-0", "00000000000000000000.log");
 
     /// <summary>Un broker que arranca de cero sobre los datos que ya están en la carpeta.</summary>
     private SegmentedLog Reiniciar() => new(_dataDir);
@@ -145,7 +145,7 @@ public sealed class RecoveryTests : IDisposable
     [Fact]
     public async Task Un_segmento_de_cero_bytes_no_rompe()
     {
-        Directory.CreateDirectory(Path.Combine(_dataDir, Topico));
+        Directory.CreateDirectory(Path.Combine(_dataDir, Topico, "partition-0"));
         await File.WriteAllBytesAsync(Segmento, []);
 
         var log = Reiniciar();

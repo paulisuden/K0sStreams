@@ -6,8 +6,13 @@ using K0sStreams.Replication.Network;
 
 namespace K0sStreams.Replication.Failover;
 
-/// <summary>Where one broker's log of a topic ends, and how to reach that broker.</summary>
-internal sealed record SurveyAnswer(string NodeId, IReplicationPeer Peer, LogTip Tip);
+/// <summary>Where one broker's log of a topic partition ends, and how to reach that broker.</summary>
+internal sealed record PartitionTip(int Partition, LogTip Tip);
+
+/// <summary>
+/// Survey answer from one broker: where each partition of a topic ends.
+/// </summary>
+internal sealed record SurveyAnswer(string NodeId, IReplicationPeer Peer, IReadOnlyList<PartitionTip> PartitionTips);
 
 /// <summary>
 /// Step 1 of a promotion: tells this broker and a majority of the others that a new epoch started, so from then on they
@@ -22,29 +27,33 @@ internal sealed class PeerSurvey
     private readonly int _needed;
     private readonly MajorityCall _majority;
     private readonly EpochTracker _epochs;
+    private readonly ITopicCatalog _catalog;
 
     public PeerSurvey(
-        ReplicationNode self, IClusterState cluster, IReadOnlyDictionary<string, IReplicationPeer> peers, MajorityCall majority, EpochTracker epochs)
+        ReplicationNode self, IClusterState cluster, ITopicCatalog catalog, IReadOnlyDictionary<string, IReplicationPeer> peers, MajorityCall majority, EpochTracker epochs)
     {
         ArgumentNullException.ThrowIfNull(peers);
+        ArgumentNullException.ThrowIfNull(catalog);
         _self = self;
         _selfId = cluster.NodeId;
         _peers = [.. peers.OrderBy(static peer => peer.Key, StringComparer.Ordinal)];
         _needed = (_peers.Length + 1) / 2;
         _majority = majority;
         _epochs = epochs;
+        _catalog = catalog;
     }
 
-    /// <summary>The most complete log; on a tie the earlier answer, so this broker (always first) keeps its own.</summary>
-    public static SurveyAnswer MostComplete(IReadOnlyList<SurveyAnswer> answers)
+    /// <summary>The most complete log for a specific partition; on a tie the earlier answer wins.</summary>
+    public static PartitionTip MostCompleteForPartition(IReadOnlyList<SurveyAnswer> answers, int partition)
     {
         ArgumentNullException.ThrowIfNull(answers);
-        var best = answers[0];
+        var best = answers[0].PartitionTips.First(p => p.Partition == partition);
         foreach (var answer in answers)
         {
-            if (answer.Tip.IsMoreCompleteThan(best.Tip))
+            var tip = answer.PartitionTips.First(p => p.Partition == partition);
+            if (tip.Tip.IsMoreCompleteThan(best.Tip))
             {
-                best = answer;
+                best = tip;
             }
         }
 
@@ -75,11 +84,42 @@ internal sealed class PeerSurvey
     /// <summary>Announces <paramref name="epoch"/> for <paramref name="topic"/> and returns where each log ends, this broker's first.</summary>
     public async Task<IReadOnlyList<SurveyAnswer>> SurveyAsync(string topic, long epoch, CancellationToken ct)
     {
-        var answers = new List<SurveyAnswer> { new(_selfId, _self, await AskTipAsync(_self, topic, epoch, ct).ConfigureAwait(false)) };
-        var peerAnswers = await _majority.AskAsync(_peers, _needed, (peer, token) => AskTipAsync(peer, topic, epoch, token), ct)
+        TopicConfig? config = _catalog.Find(topic);
+        if (config is null)
+        {
+            // Topic not in catalog yet (catalog is eventually consistent), default to 1 partition for the survey.
+            // The actual partition count is determined by what peers report during the survey.
+            config = new TopicConfig(topic, 1, 3, TimeSpan.FromSeconds(5));
+        }
+
+        var answers = new List<SurveyAnswer>();
+        var selfTips = new List<PartitionTip>(config.Partitions);
+        for (int partition = 0; partition < config.Partitions; partition++)
+        {
+            var tip = await AskTipAsync(_self, topic, partition, epoch, ct).ConfigureAwait(false);
+            selfTips.Add(new PartitionTip(partition, tip.Tip));
+        }
+        answers.Add(new SurveyAnswer(_selfId, _self, selfTips));
+
+        var peerTips = await _majority.AskAsync(_peers, _needed, (peer, token) => AskAllPartitionsAsync(peer, topic, config.Partitions, epoch, token), ct)
             .ConfigureAwait(false);
-        answers.AddRange(peerAnswers.Select(static answer => new SurveyAnswer(answer.NodeId, answer.Peer, answer.Answer)));
+
+        foreach (var peerTip in peerTips)
+        {
+            answers.Add(new SurveyAnswer(peerTip.NodeId, peerTip.Peer, peerTip.Answer));
+        }
         return answers;
+    }
+
+    private async Task<IReadOnlyList<PartitionTip>> AskAllPartitionsAsync(IReplicationPeer peer, string topic, int partitions, long epoch, CancellationToken ct)
+    {
+        var tips = new List<PartitionTip>(partitions);
+        for (int partition = 0; partition < partitions; partition++)
+        {
+            var tip = await AskTipAsync(peer, topic, partition, epoch, ct).ConfigureAwait(false);
+            tips.Add(new PartitionTip(partition, tip.Tip));
+        }
+        return tips;
     }
 
     /// <summary>
@@ -87,22 +127,23 @@ internal sealed class PeerSurvey
     /// topic's lock, so an append from the old leader still running there is either counted in the answer or refused
     /// afterwards. Then reads the epoch of its last record.
     /// </summary>
-    private async Task<LogTip> AskTipAsync(IReplicationPeer peer, string topic, long epoch, CancellationToken ct)
+    private async Task<PartitionTip> AskTipAsync(IReplicationPeer peer, string topic, int partition, long epoch, CancellationToken ct)
     {
-        var announce = new AppendRequest { Epoch = epoch, Topic = topic, PrevOffset = -1, LeaderHw = -1, LeaderId = _selfId };
+        var announce = new AppendRequest { Epoch = epoch, Topic = topic, Partition = partition, PrevOffset = -1, LeaderHw = -1, LeaderId = _selfId };
         var response = await peer.AppendAsync(announce, ct).ConfigureAwait(false);
         EnsureNotNewer(response.Epoch, epoch);
         if (!response.Ok)
         {
-            throw new InvalidOperationException($"Announcing epoch {epoch} for {topic} failed with {response.Code}: {response.Error}");
+            throw new InvalidOperationException($"Announcing epoch {epoch} for {topic} partition {partition} failed with {response.Code}: {response.Error}");
         }
 
-        return response.EndOffset < 0 ? LogTip.Empty : await LastRecordAsync(peer, topic, epoch, response.EndOffset, ct).ConfigureAwait(false);
+        var tip = response.EndOffset < 0 ? LogTip.Empty : await LastRecordAsync(peer, topic, partition, epoch, response.EndOffset, ct).ConfigureAwait(false);
+        return new PartitionTip(partition, tip);
     }
 
-    private static async Task<LogTip> LastRecordAsync(IReplicationPeer peer, string topic, long epoch, long endOffset, CancellationToken ct)
+    private static async Task<LogTip> LastRecordAsync(IReplicationPeer peer, string topic, int partition, long epoch, long endOffset, CancellationToken ct)
     {
-        var request = new FetchRequest { Epoch = epoch, Topic = topic, FromOffset = endOffset, MaxRecords = 1 };
+        var request = new FetchRequest { Epoch = epoch, Topic = topic, Partition = partition, FromOffset = endOffset, MaxRecords = 1 };
         await foreach (var batch in peer.FetchAsync(request, ct).ConfigureAwait(false))
         {
             foreach (var bytes in batch.Records)
@@ -112,7 +153,7 @@ internal sealed class PeerSurvey
             }
         }
 
-        throw new InvalidOperationException($"The log of {topic} shrank while it was being surveyed.");
+        throw new InvalidOperationException($"The log of {topic} partition {partition} shrank while it was being surveyed.");
     }
 
     /// <summary>A broker at a newer epoch means another leader took over: remember that epoch and give up.</summary>

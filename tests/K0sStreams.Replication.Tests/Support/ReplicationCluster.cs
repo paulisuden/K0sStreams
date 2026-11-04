@@ -3,7 +3,9 @@ using K0sStreams.Contracts;
 using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Leader;
 using K0sStreams.Replication.Network;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using static K0sStreams.Replication.Tests.Support.TestRecords;
 using Record = K0sStreams.Contracts.Record;
@@ -33,10 +35,15 @@ internal sealed class ReplicationCluster : IAsyncDisposable
             peers[_followers[i].Cluster.NodeId] = _links[i];
         }
 
+        var catalogServices = new ServiceCollection();
+        catalogServices.AddSingleton<ITopicCatalog>(Leader.Catalog);
+        var catalogProvider = catalogServices.BuildServiceProvider();
+
         Replicator = new QuorumReplicator(
             Leader.Log,
             Leader.Cluster,
             Leader.Epochs,
+            catalogProvider,
             Leader.KnownTopics,
             peers,
             Microsoft.Extensions.Options.Options.Create(Options),
@@ -59,10 +66,10 @@ internal sealed class ReplicationCluster : IAsyncDisposable
     /// <summary>Appends a message to the leader's log, stamped with the leader's epoch, as B's API will.</summary>
     public async Task<long> WriteAsync(string value = "v") =>
         await Leader.Log.AppendAsync(
-            Topic, Record.NewMessage(Leader.Cluster.CurrentEpoch, 0, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value)));
+            Topic, 0, Record.NewMessage(Leader.Cluster.CurrentEpoch, 0, ReadOnlyMemory<byte>.Empty, Encoding.UTF8.GetBytes(value)));
 
     public Task WaitAsync(long offset, CancellationToken ct = default) =>
-        Replicator.WaitForQuorumAsync(Topic, 0, offset, ct).AsTask();
+        Replicator.WaitForQuorumAsync(Topic, 0, offset, null, ct).AsTask();
 
     /// <summary>Waits until the write at <paramref name="offset"/> is confirmed, letting fake time move meanwhile.</summary>
     public async Task ConfirmAsync(long offset)
@@ -74,11 +81,15 @@ internal sealed class ReplicationCluster : IAsyncDisposable
 
     public Task EventuallyAsync(Func<bool> condition, string what) => Time.EventuallyAsync(condition, what);
 
-    /// <summary>Replaces follower <paramref name="index"/> with a fresh broker with an empty log, like a restart with InMemoryLog.</summary>
-    public void RestartFollower(int index)
+    /// <summary>
+    /// Replaces follower <paramref name="index"/> with a fresh broker, like a restart. Its log is <paramref name="log"/>
+    /// (empty by default, as with InMemoryLog); pasando el log que tenía antes de caerse se simula un reinicio con el
+    /// disco intacto, que es el caso real: el pod vuelve con lo que alcanzó a escribir y atrasado respecto del líder.
+    /// </summary>
+    public void RestartFollower(int index, ILog? log = null)
     {
         _restarted.Add(_followers[index]);
-        _followers[index] = new TestNode(_followers[index].Cluster.NodeId, options: Options);
+        _followers[index] = new TestNode(_followers[index].Cluster.NodeId, options: Options, log: log);
         _links[index].Inner = _followers[index].Node;
     }
 

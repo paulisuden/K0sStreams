@@ -1,4 +1,5 @@
 using K0sStreams.Contracts;
+using K0sStreams.Contracts.Fakes;
 using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Leader;
 using K0sStreams.Replication.Tests.Support;
@@ -24,8 +25,8 @@ public class QuorumReplicatorTests
 
         await cluster.ConfirmAsync(offset);
 
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(offset);
-        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic) == offset), "both followers to have the record");
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(offset);
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic, 0) == offset), "both followers to have the record");
         foreach (var follower in cluster.Followers)
         {
             (await EncodedAsync(follower.Log)).Should().Equal(await EncodedAsync(cluster.Leader.Log));
@@ -41,8 +42,8 @@ public class QuorumReplicatorTests
 
         await cluster.ConfirmAsync(offset);
 
-        cluster.Followers[0].Log.EndOffset(Topic).Should().Be(-1);
-        cluster.Followers[1].Log.EndOffset(Topic).Should().Be(offset);
+        cluster.Followers[0].Log.EndOffset(Topic, 0).Should().Be(-1);
+        cluster.Followers[1].Log.EndOffset(Topic, 0).Should().Be(offset);
     }
 
     [Fact]
@@ -54,7 +55,7 @@ public class QuorumReplicatorTests
 
         await cluster.ConfirmAsync(offset);
 
-        cluster.Followers[0].Log.EndOffset(Topic).Should().Be(-1);
+        cluster.Followers[0].Log.EndOffset(Topic, 0).Should().Be(-1);
     }
 
     [Fact]
@@ -70,7 +71,7 @@ public class QuorumReplicatorTests
         await cluster.Time.AdvanceSlowlyAsync(TimeSpan.FromSeconds(10));
 
         wait.IsCompleted.Should().BeFalse();
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(-1);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(-1);
         await cts.CancelAsync();
         await FluentActions.Awaiting(() => wait).Should().ThrowAsync<OperationCanceledException>();
     }
@@ -145,7 +146,7 @@ public class QuorumReplicatorTests
 
         await cluster.EventuallyAsync(() => all.IsCompleted, "every write to be confirmed");
         await all;
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(199);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(199);
     }
 
     [Fact]
@@ -159,6 +160,18 @@ public class QuorumReplicatorTests
     }
 
     [Fact]
+    public async Task Sin_quorum_y_timeout_lanza_QuorumLostException()
+    {
+        await using var cluster = new ReplicationCluster();
+        cluster.Links[0].Disconnect();
+        cluster.Links[1].Disconnect();
+        long offset = await cluster.WriteAsync();
+
+        var wait = cluster.Replicator.WaitForQuorumAsync(Topic, 0, offset, TimeSpan.FromMilliseconds(50));
+        await FluentActions.Awaiting(() => wait.AsTask()).Should().ThrowAsync<QuorumLostException>();
+    }
+
+    [Fact]
     public async Task Followers_learn_the_high_watermark_after_confirmation()
     {
         await using var cluster = new ReplicationCluster();
@@ -166,7 +179,7 @@ public class QuorumReplicatorTests
 
         await cluster.ConfirmAsync(offset);
 
-        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.HighWatermark(Topic) == offset), "followers to learn the HW");
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.HighWatermark(Topic, 0) == offset), "followers to learn the HW");
     }
 
     [Fact]
@@ -178,7 +191,41 @@ public class QuorumReplicatorTests
 
         cluster.RestartFollower(0);
 
-        await cluster.EventuallyAsync(() => cluster.Followers[0].Log.EndOffset(Topic) == offset, "the restarted follower to catch up");
+        await cluster.EventuallyAsync(() => cluster.Followers[0].Log.EndOffset(Topic, 0) == offset, "the restarted follower to catch up");
+    }
+
+    [Fact]
+    public async Task A_follower_that_restarts_with_a_stale_log_catches_up_on_rejoin()
+    {
+        await using var cluster = new ReplicationCluster();
+        for (int i = 0; i < 3; i++)
+        {
+            await cluster.ConfirmAsync(await cluster.WriteAsync());
+        }
+
+        // Se cae el seguidor 0; mientras está abajo el líder confirma dos mensajes más.
+        cluster.Links[0].Disconnect();
+        for (int i = 0; i < 2; i++)
+        {
+            await cluster.ConfirmAsync(await cluster.WriteAsync());
+        }
+
+        // Vuelve con el disco que tenía: los offsets 0 a 2, confirmados hasta el 2.
+        var stale = new InMemoryLog();
+        await foreach (var record in cluster.Leader.Log.ReadAsync(Topic, 0, 0, 3))
+        {
+            await stale.AppendAsync(Topic, 0, record);
+        }
+
+        stale.AdvanceHighWatermark(Topic, 0, 2);
+        cluster.RestartFollower(0, stale);
+        cluster.Links[0].Reconnect();
+
+        await cluster.EventuallyAsync(
+            () => cluster.Followers[0].Log.EndOffset(Topic, 0) == 4,
+            "el seguidor atrasado se ponga al día al volver");
+        cluster.Followers[0].Log.HighWatermark(Topic, 0).Should().Be(4);
+        (await EncodedAsync(cluster.Followers[0].Log)).Should().Equal(await EncodedAsync(cluster.Leader.Log));
     }
 
     [Fact]
@@ -187,16 +234,16 @@ public class QuorumReplicatorTests
         await using var cluster = new ReplicationCluster(leaderEpoch: 2);
         await SeedAsync(cluster.Leader.Log, 1, 1); // left by the previous leader, never confirmed
         var oldRecord = cluster.WaitAsync(1);
-        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic) == 1), "followers to copy the old records");
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic, 0) == 1), "followers to copy the old records");
         await cluster.Time.AdvanceSlowlyAsync(TimeSpan.FromSeconds(1));
         oldRecord.IsCompleted.Should().BeFalse();
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(-1);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(-1);
 
         long offset = await cluster.WriteAsync();
         await cluster.ConfirmAsync(offset);
 
         await oldRecord;
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(offset);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(offset);
     }
 
     [Fact]
@@ -267,7 +314,7 @@ public class QuorumReplicatorTests
         long offset = await cluster.WriteAsync();
 
         cluster.Replicator.WaitForQuorumAsync(Topic, 0, offset).AsTask().IsCompletedSuccessfully.Should().BeTrue();
-        cluster.Leader.Log.HighWatermark(Topic).Should().Be(offset);
+        cluster.Leader.Log.HighWatermark(Topic, 0).Should().Be(offset);
     }
 
     [Fact]
@@ -282,6 +329,33 @@ public class QuorumReplicatorTests
         await cluster.Replicator.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
 
         await FluentActions.Awaiting(() => wait).Should().ThrowAsync<NotLeaderException>();
+    }
+
+    [Fact]
+    public async Task StartKnownTopics_arranca_bucles_de_todas_las_particiones_sin_escritura_de_cliente()
+    {
+        await using var cluster = new ReplicationCluster();
+
+        // Tópico con 2 particiones y datos en ambas del lado del líder.
+        await cluster.Leader.Catalog.CreateAsync(new TopicConfig(Topic, 2, 3, TimeSpan.FromSeconds(1)));
+        await cluster.Leader.Log.AppendAsync(Topic, 0, TestRecords.Message(0, 1, "p0"));
+        await cluster.Leader.Log.AppendAsync(Topic, 1, TestRecords.Message(0, 1, "p1"));
+
+        // Seguidores desconectados: todavía no les llegó nada.
+        cluster.Links[0].Disconnect();
+        cluster.Links[1].Disconnect();
+
+        // El mismo broker sigue liderando, pero en una época nueva. StartKnownTopics debe arrancar
+        // un bucle de replicación por cada partición, aunque ningún cliente haya escrito.
+        cluster.Leader.Cluster.ChangeEpoch(2, leader: true);
+
+        // Reconectar: los bucles ya existen y empujan los datos de ambas particiones.
+        cluster.Links[0].Reconnect();
+        cluster.Links[1].Reconnect();
+
+        // Ambos seguidores se ponen al día en ambas particiones sin escritura de cliente tras el cambio de época.
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic, 0) == 0), "partición 0 al día");
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic, 1) == 0), "partición 1 al día");
     }
 
     [Fact]

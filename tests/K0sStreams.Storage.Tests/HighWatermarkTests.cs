@@ -16,7 +16,7 @@ public sealed class HighWatermarkTests : IDisposable
 
     private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "k0sstreams-tests", Guid.NewGuid().ToString("N"));
 
-    private string Checkpoint => Path.Combine(_dataDir, Topico, "checkpoint");
+    private string Checkpoint => Path.Combine(_dataDir, Topico, "partition-0", "checkpoint");
 
     private SegmentedLog Reiniciar() => new(_dataDir);
 

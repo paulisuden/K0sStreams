@@ -39,12 +39,12 @@ public class LogTipTests
         using var broker = new TestNode();
         var answers = new[]
         {
-            new SurveyAnswer("broker-2", broker.Node, new LogTip(5, 1)),
-            new SurveyAnswer("broker-1", broker.Node, new LogTip(3, 2)),
-            new SurveyAnswer("broker-0", broker.Node, new LogTip(9, 1)),
+            new SurveyAnswer("broker-2", broker.Node, [new PartitionTip(0, new LogTip(5, 1))]),
+            new SurveyAnswer("broker-1", broker.Node, [new PartitionTip(0, new LogTip(3, 2))]),
+            new SurveyAnswer("broker-0", broker.Node, [new PartitionTip(0, new LogTip(9, 1))]),
         };
 
-        PeerSurvey.MostComplete(answers).NodeId.Should().Be("broker-1");
+        PeerSurvey.MostCompleteForPartition(answers, 0).Tip.Should().Be(new LogTip(3, 2));
     }
 
     [Fact]
@@ -53,10 +53,10 @@ public class LogTipTests
         using var broker = new TestNode();
         var answers = new[]
         {
-            new SurveyAnswer("broker-2", broker.Node, new LogTip(5, 1)),
-            new SurveyAnswer("broker-1", broker.Node, new LogTip(5, 1)),
+            new SurveyAnswer("broker-2", broker.Node, [new PartitionTip(0, new LogTip(5, 1))]),
+            new SurveyAnswer("broker-1", broker.Node, [new PartitionTip(0, new LogTip(5, 1))]),
         };
 
-        PeerSurvey.MostComplete(answers).NodeId.Should().Be("broker-2");
+        PeerSurvey.MostCompleteForPartition(answers, 0).Tip.Should().Be(new LogTip(5, 1));
     }
 }
