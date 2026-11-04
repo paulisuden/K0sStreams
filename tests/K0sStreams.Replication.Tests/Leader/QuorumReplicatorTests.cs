@@ -160,6 +160,18 @@ public class QuorumReplicatorTests
     }
 
     [Fact]
+    public async Task Sin_quorum_y_timeout_lanza_QuorumLostException()
+    {
+        await using var cluster = new ReplicationCluster();
+        cluster.Links[0].Disconnect();
+        cluster.Links[1].Disconnect();
+        long offset = await cluster.WriteAsync();
+
+        var wait = cluster.Replicator.WaitForQuorumAsync(Topic, 0, offset, TimeSpan.FromMilliseconds(50));
+        await FluentActions.Awaiting(() => wait.AsTask()).Should().ThrowAsync<QuorumLostException>();
+    }
+
+    [Fact]
     public async Task Followers_learn_the_high_watermark_after_confirmation()
     {
         await using var cluster = new ReplicationCluster();
