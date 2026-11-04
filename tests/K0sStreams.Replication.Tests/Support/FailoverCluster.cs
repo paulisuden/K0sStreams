@@ -20,7 +20,8 @@ internal sealed class FailoverBroker : IAsyncDisposable
         Node = node;
         var wrapped = Microsoft.Extensions.Options.Options.Create(options);
         Replicator = new QuorumReplicator(
-            node.Log, node.Cluster, node.Epochs, node.KnownTopics, peers, wrapped, time, NullLogger<QuorumReplicator>.Instance);
+            node.Log, node.Cluster, node.Epochs, node.Catalog, node.KnownTopics, peers, wrapped, time,
+            NullLogger<QuorumReplicator>.Instance);
         Survey = new PeerSurvey(node.Node, node.Cluster, node.Catalog, peers, new MajorityCall(wrapped, time), node.Epochs);
         Promotion = new LeaderPromotion(
             node.Cluster,

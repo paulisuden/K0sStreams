@@ -1,4 +1,5 @@
 using K0sStreams.Contracts;
+using K0sStreams.Contracts.Fakes;
 using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Leader;
 using K0sStreams.Replication.Tests.Support;
@@ -182,6 +183,40 @@ public class QuorumReplicatorTests
     }
 
     [Fact]
+    public async Task A_follower_that_restarts_with_a_stale_log_catches_up_on_rejoin()
+    {
+        await using var cluster = new ReplicationCluster();
+        for (int i = 0; i < 3; i++)
+        {
+            await cluster.ConfirmAsync(await cluster.WriteAsync());
+        }
+
+        // Se cae el seguidor 0; mientras está abajo el líder confirma dos mensajes más.
+        cluster.Links[0].Disconnect();
+        for (int i = 0; i < 2; i++)
+        {
+            await cluster.ConfirmAsync(await cluster.WriteAsync());
+        }
+
+        // Vuelve con el disco que tenía: los offsets 0 a 2, confirmados hasta el 2.
+        var stale = new InMemoryLog();
+        await foreach (var record in cluster.Leader.Log.ReadAsync(Topic, 0, 0, 3))
+        {
+            await stale.AppendAsync(Topic, 0, record);
+        }
+
+        stale.AdvanceHighWatermark(Topic, 0, 2);
+        cluster.RestartFollower(0, stale);
+        cluster.Links[0].Reconnect();
+
+        await cluster.EventuallyAsync(
+            () => cluster.Followers[0].Log.EndOffset(Topic, 0) == 4,
+            "el seguidor atrasado se ponga al día al volver");
+        cluster.Followers[0].Log.HighWatermark(Topic, 0).Should().Be(4);
+        (await EncodedAsync(cluster.Followers[0].Log)).Should().Equal(await EncodedAsync(cluster.Leader.Log));
+    }
+
+    [Fact]
     public async Task The_high_watermark_waits_for_a_record_of_the_current_epoch()
     {
         await using var cluster = new ReplicationCluster(leaderEpoch: 2);
@@ -282,6 +317,33 @@ public class QuorumReplicatorTests
         await cluster.Replicator.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
 
         await FluentActions.Awaiting(() => wait).Should().ThrowAsync<NotLeaderException>();
+    }
+
+    [Fact]
+    public async Task StartKnownTopics_arranca_bucles_de_todas_las_particiones_sin_escritura_de_cliente()
+    {
+        await using var cluster = new ReplicationCluster();
+
+        // Tópico con 2 particiones y datos en ambas del lado del líder.
+        await cluster.Leader.Catalog.CreateAsync(new TopicConfig(Topic, 2, 3, TimeSpan.FromSeconds(1)));
+        await cluster.Leader.Log.AppendAsync(Topic, 0, TestRecords.Message(0, 1, "p0"));
+        await cluster.Leader.Log.AppendAsync(Topic, 1, TestRecords.Message(0, 1, "p1"));
+
+        // Seguidores desconectados: todavía no les llegó nada.
+        cluster.Links[0].Disconnect();
+        cluster.Links[1].Disconnect();
+
+        // El mismo broker sigue liderando, pero en una época nueva. StartKnownTopics debe arrancar
+        // un bucle de replicación por cada partición, aunque ningún cliente haya escrito.
+        cluster.Leader.Cluster.ChangeEpoch(2, leader: true);
+
+        // Reconectar: los bucles ya existen y empujan los datos de ambas particiones.
+        cluster.Links[0].Reconnect();
+        cluster.Links[1].Reconnect();
+
+        // Ambos seguidores se ponen al día en ambas particiones sin escritura de cliente tras el cambio de época.
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic, 0) == 0), "partición 0 al día");
+        await cluster.EventuallyAsync(() => cluster.Followers.All(f => f.Log.EndOffset(Topic, 1) == 0), "partición 1 al día");
     }
 
     [Fact]

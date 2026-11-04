@@ -16,6 +16,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
 {
     private readonly Lock _gate = new();
     private readonly IClusterState _cluster;
+    private readonly ITopicCatalog _catalog;
     private readonly KnownTopics _knownTopics;
     private readonly KeyValuePair<string, IReplicationPeer>[] _peers;
     private LeaderTerm? _term;
@@ -25,6 +26,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         ILog log,
         IClusterState cluster,
         EpochTracker epochs,
+        ITopicCatalog catalog,
         KnownTopics knownTopics,
         IReadOnlyDictionary<string, IReplicationPeer> peers,
         IOptions<ReplicationOptions> options,
@@ -34,6 +36,7 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         ArgumentNullException.ThrowIfNull(peers);
         Log = log;
         _cluster = cluster;
+        _catalog = catalog;
         Epochs = epochs;
         _knownTopics = knownTopics;
         _peers = [.. peers.OrderBy(static peer => peer.Key, StringComparer.Ordinal)];
@@ -248,9 +251,9 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
     }
 
     /// <summary>
-    /// Right after taking over, starts replicating every topic this broker holds. The promotion left an EpochChange
-    /// record at the end of each one; once a majority has it, it's confirmed, and so is every older record before it
-    /// (Raft's no-op entry), without waiting for a client write.
+    /// Right after taking over, starts replicating every topic this broker holds, in every partition. The promotion left
+    /// an EpochChange record at the end of each partition; once a majority has it, it's confirmed, and so is every older
+    /// record before it (Raft's no-op entry), without waiting for a client write.
     /// </summary>
     private void StartKnownTopics()
     {
@@ -260,13 +263,38 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
             return;
         }
 
-        foreach (string topic in _knownTopics.Snapshot())
+        foreach ((string topic, int partitions) in TopicsToReplicate())
         {
-            if (Log.EndOffset(topic, 0) >= 0)
+            for (int partition = 0; partition < partitions; partition++)
             {
-                GetOrStartTopic(term, topic, 0, Log.HighWatermark(topic, 0) + 1);
+                if (Log.EndOffset(topic, partition) >= 0)
+                {
+                    GetOrStartTopic(term, topic, partition, Log.HighWatermark(topic, partition) + 1);
+                }
             }
         }
+    }
+
+    /// <summary>
+    /// The topics this broker holds a log for, with their partition count. The catalog is the source: it's log-backed and
+    /// replicated, so a broker that just restarted still knows every topic and how many partitions each one has. What the
+    /// catalog doesn't list are the internal topics replication has seen (the catalog's own log, for one), which count as
+    /// a single partition.
+    /// </summary>
+    private Dictionary<string, int> TopicsToReplicate()
+    {
+        var topics = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (TopicConfig config in _catalog.List())
+        {
+            topics[config.Name] = config.Partitions;
+        }
+
+        foreach (string topic in _knownTopics.Snapshot())
+        {
+            topics.TryAdd(topic, 1);
+        }
+
+        return topics;
     }
 
     private void OnEpochChanged(long epoch)

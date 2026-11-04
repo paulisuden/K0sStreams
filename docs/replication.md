@@ -217,7 +217,11 @@ follower              e1   e1         ← stale, never confirmed
 
 The leader sends `Append(prev 40/e1, records [41/e2, 42/e2])`. The follower's 40 matches. Its 41 has a different epoch, so it truncates after 40 and appends 41 and 42.
 
-**`Fetch`** (pull, follower → leader) is also in the proto. We propose to use it for the leader-promotion step (section 10.1) and, optionally, for bulk catch-up. Keeping steady state on a single push mechanism keeps the reasoning simple.
+**`Fetch`** (pull, follower → leader) is how the promotion step copies a more complete log (section 10.1), and how a follower that rejoins catches up (below).
+
+**Follower rejoins: it pulls.** The push above only runs while the leader has a `PeerReplicator` for that topic+partition, and those loops start on a write or on a promotion. A pod that restarts therefore has no way to announce itself: until the leader writes again to *that* partition there may be nothing pushing, and the follower keeps serving a log that is behind the leader (it answers reads with an older HW, and a client load-balanced onto it sees messages as missing).
+
+So the follower asks. It wakes when it starts (it may have missed writes while down), when the epoch changes (a new leader may have more history), and — as a backstop — every `CatchUpInterval` in case the leader's push went silent without an error. On each pass it takes the topic list from `ITopicCatalog`, asks the leader `GetState` for each partition, and where the leader is ahead it copies with `Fetch` from its own last confirmed record and appends the batches through its own `Append` handling — the same checks as a push: epoch fence, continuity, CRC, divergent-tail truncation and the HW rule. Finding the leader needs no new contract: `GetState` reports `IsLeader`, so the follower asks its configured peers. The pass is idempotent, so it can also run while the leader is pushing. If a pass finds the log behind, the follower retries with growing backoff until it catches up; a pass that finds nothing missing sends it back to sleep until the next wake-up, so a caught-up follower makes no RPCs at all.
 
 ### 5.5 Leader changes and fencing
 
@@ -235,7 +239,7 @@ So a replaced leader can never acknowledge a write, even if it doesn't know yet 
 
 ### 5.6 Heartbeats
 
-The leader sends an empty `Append` to each follower every `HeartbeatInterval` (around 500 ms). It is how followers learn the final HW after a burst of writes, and how the leader notices that a follower is back. Followers don't use heartbeats to detect a dead leader; D's Lease does that.
+The leader sends an empty `Append` to each follower every `HeartbeatInterval` (around 500 ms). It is how followers learn the final HW after a burst of writes, and how the leader notices that a follower is back. Followers don't use heartbeats to detect a dead leader; D's Lease does that. A follower that has no loop pushing to it learns the HW with its own `Fetch` pass (section 5.4).
 
 ---
 
@@ -311,6 +315,7 @@ Configuration lives in the replication block's own section, so there is no contr
   },
   "RpcTimeout": "00:00:02",
   "HeartbeatInterval": "00:00:00.500",
+  "CatchUpInterval": "00:00:10",
   "RetryBackoff": "00:00:00.100",
   "MaxRetryBackoff": "00:00:02",
   "MaxBatchRecords": 500,
@@ -347,6 +352,7 @@ Added in phase 3 for the leader side:
 | One follower down | Writes still confirm (2 of 3). This is the phase 3 done criterion. | 3 ✅ |
 | Both followers down | `WaitForQuorumAsync` waits until cancelled; the HW doesn't move. | 3 ✅ |
 | Follower restarts empty | Catches up from offset 0 and rejoins the quorum, in process and over real gRPC. | 3 ✅ |
+| Follower restarts behind | Comes back with the log it had, misses writes while it was down, and catches up on its own with `Fetch` even if the leader pushes nothing. | 4 ✅ |
 | Leader with an old epoch | Gets `STALE_EPOCH`; its pending waits fail with `NotLeaderException`. | 3 ✅ |
 | Demoted while waiting | `NotLeaderException`. | 3 ✅ |
 | Failover | A confirmed record survives a leader change, after the promotion step. | 4 |

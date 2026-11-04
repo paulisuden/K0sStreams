@@ -19,6 +19,13 @@ public sealed class ReplicationOptions
     /// <summary>An idle leader sends each follower an empty Append this often, so followers learn the high watermark.</summary>
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromMilliseconds(500);
 
+    /// <summary>
+    /// Red de seguridad: un seguidor al día se duerme hasta que cambie la época, y solo despierta pasado este intervalo
+    /// si el empuje del líder se quedó callado sin dar error. Un seguidor atrasado se despierta al arrancar el proceso
+    /// o al cambiar la época, y reintenta con espera creciente hasta ponerse al día.
+    /// </summary>
+    public TimeSpan CatchUpInterval { get; set; } = TimeSpan.FromSeconds(10);
+
     /// <summary>First wait before retrying a follower that failed or could not be reached. It doubles on each failure.</summary>
     public TimeSpan RetryBackoff { get; set; } = TimeSpan.FromMilliseconds(100);
 
@@ -34,6 +41,7 @@ public sealed class ReplicationOptions
     internal bool IsValid() =>
         RpcTimeout > TimeSpan.Zero
         && HeartbeatInterval > TimeSpan.Zero
+        && CatchUpInterval > TimeSpan.Zero
         && RetryBackoff > TimeSpan.Zero
         && MaxRetryBackoff >= RetryBackoff
         && MaxBatchRecords > 0

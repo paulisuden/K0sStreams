@@ -38,6 +38,7 @@ internal sealed class ReplicationCluster : IAsyncDisposable
             Leader.Log,
             Leader.Cluster,
             Leader.Epochs,
+            Leader.Catalog,
             Leader.KnownTopics,
             peers,
             Microsoft.Extensions.Options.Options.Create(Options),
@@ -75,11 +76,15 @@ internal sealed class ReplicationCluster : IAsyncDisposable
 
     public Task EventuallyAsync(Func<bool> condition, string what) => Time.EventuallyAsync(condition, what);
 
-    /// <summary>Replaces follower <paramref name="index"/> with a fresh broker with an empty log, like a restart with InMemoryLog.</summary>
-    public void RestartFollower(int index)
+    /// <summary>
+    /// Replaces follower <paramref name="index"/> with a fresh broker, like a restart. Its log is <paramref name="log"/>
+    /// (empty by default, as with InMemoryLog); pasando el log que tenía antes de caerse se simula un reinicio con el
+    /// disco intacto, que es el caso real: el pod vuelve con lo que alcanzó a escribir y atrasado respecto del líder.
+    /// </summary>
+    public void RestartFollower(int index, ILog? log = null)
     {
         _restarted.Add(_followers[index]);
-        _followers[index] = new TestNode(_followers[index].Cluster.NodeId, options: Options);
+        _followers[index] = new TestNode(_followers[index].Cluster.NodeId, options: Options, log: log);
         _links[index].Inner = _followers[index].Node;
     }
 
