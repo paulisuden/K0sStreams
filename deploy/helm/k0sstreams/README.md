@@ -6,9 +6,10 @@ A Helm chart for the [K0sStreams](https://github.com/paulisuden/K0sStreams) dist
 
 The chart deploys a 3-replica StatefulSet of K0sStreams brokers:
 
-- **Headless Service** — stable DNS per pod (`broker-0`, `broker-1`, `broker-2`) used for inter-broker gRPC replication and leader address resolution
+- **Headless Service** — stable DNS per pod (`k0sstreams-0`, `k0sstreams-1`, `k0sstreams-2`) used for inter-broker gRPC replication and leader address resolution
 - **LoadBalancer Service** — single entry point for client HTTP traffic on port 9090
-- **RBAC** — ServiceAccount + Role/RoleBinding for Kubernetes Lease-based leader election
+- **Topic CRD** — `topics.k0sstreams.io/v1`, installed from `crds/`
+- **RBAC** — ServiceAccount + Roles for Lease-based leader election and for reading `Topic` objects
 - **PVC** — one PersistentVolumeClaim per broker for the disk-backed log
 - **Pod anti-affinity** — prefers brokers on different nodes
 
@@ -21,7 +22,7 @@ The chart deploys a 3-replica StatefulSet of K0sStreams brokers:
 ## Quick start
 
 ```bash
-# Install K0sStreams
+# Install K0sStreams (this also installs the Topic CRD)
 helm install k0sstreams ./deploy/helm/k0sstreams --namespace k0sstreams --create-namespace
 
 # Check rollout
@@ -29,7 +30,23 @@ kubectl rollout status statefulset/k0sstreams -n k0sstreams
 
 # Get the LoadBalancer URL
 kubectl get service k0sstreams-lb -n k0sstreams
+
+# Create a topic (the leader picks it up within ~5 s)
+kubectl apply -n k0sstreams -f - <<'EOF'
+apiVersion: k0sstreams.io/v1
+kind: Topic
+metadata:
+  name: orders
+spec:
+  partitions: 3
+EOF
+
+kubectl get topics -n k0sstreams
 ```
+
+In-cluster clients use `http://k0sstreams.k0sstreams.svc.cluster.local:9090`.
+A follower answers writes with `307` to the leader's pod DNS name, so clients must follow
+redirects; that name resolves only inside the cluster.
 
 ## Configuration
 
@@ -53,6 +70,35 @@ kubectl get service k0sstreams-lb -n k0sstreams
 | `persistence.size` | PVC size per broker | `1Gi` |
 | `persistence.storageClass` | StorageClass name | `""` (default) |
 | `imagePullSecrets` | Secrets to pull a private image | `[]` |
+
+## Topics
+
+Topics are `Topic` objects in the release namespace. The chart installs the CRD and the RBAC the
+leader needs to list them; the leader reconciles every 5 seconds.
+
+| Field | Rule | Default |
+|---|---|---|
+| `spec.partitions` | 1–64 | `1` |
+| `spec.maxRetries` | ≥ 0 | `3` |
+| `spec.retryBackoffSeconds` | ≥ 0 | `5` |
+
+The name is the Kubernetes object name. `k0s.topics` is reserved. Editing or deleting a `Topic`
+does not alter or delete an existing topic, and the partition count is permanent.
+
+Clients can discover topics over HTTP:
+
+```bash
+curl 'http://k0sstreams.k0sstreams.svc.cluster.local:9090/v1/topics'
+curl 'http://k0sstreams.k0sstreams.svc.cluster.local:9090/v1/topics/orders'
+```
+
+Helm installs CRDs but does not upgrade them. After changing the schema, apply it manually:
+
+```bash
+kubectl apply -f deploy/helm/k0sstreams/crds/topic-crd.yaml
+```
+
+The copy used by the raw manifests is `deploy/topic-crd.yaml`.
 
 ## Environment variables
 

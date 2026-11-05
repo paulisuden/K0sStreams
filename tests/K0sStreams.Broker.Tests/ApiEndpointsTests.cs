@@ -91,6 +91,40 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     }
 
     [Fact]
+    public async Task Listar_topicos_devuelve_la_configuracion_del_catalogo()
+    {
+        string topic = NewTopic();
+        await CreateTopic(topic, partitions: 3);
+
+        TopicResponse[]? topics = await _client.GetFromJsonAsync<TopicResponse[]>("/v1/topics");
+
+        TopicResponse created = topics!.Single(t => t.Name == topic);
+        created.Partitions.Should().Be(3);
+        created.MaxRetries.Should().Be(3);
+        created.RetryBackoffSeconds.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task Consultar_un_topico_devuelve_su_configuracion()
+    {
+        string topic = NewTopic();
+        await CreateTopic(topic, partitions: 2);
+
+        TopicResponse? response = await _client.GetFromJsonAsync<TopicResponse>($"/v1/topics/{topic}");
+
+        response!.Name.Should().Be(topic);
+        response.Partitions.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Consultar_un_topico_inexistente_devuelve_not_found()
+    {
+        var response = await _client.GetAsync(new Uri($"/v1/topics/{NewTopic()}", UriKind.Relative));
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
     public async Task Leer_devuelve_solo_los_mensajes_hasta_el_high_watermark()
     {
         string topic = NewTopic();

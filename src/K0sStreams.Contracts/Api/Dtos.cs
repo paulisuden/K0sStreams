@@ -23,6 +23,9 @@ public sealed record NackRequest(string? Reason = null);
 
 public sealed record DeadLetterResponse(int Partition, long Offset, string? Key, string Value, int Attempts, string? LastReason);
 
+/// <summary>Un tópico del catálogo tal como lo ve un cliente (sin exponer el estado interno del log).</summary>
+public sealed record TopicResponse(string Name, int Partitions, int MaxRetries, int RetryBackoffSeconds);
+
 // Consumer Group API DTOs
 
 /// <param name="ConsumerId">Identificador único del consumidor.</param>

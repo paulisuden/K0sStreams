@@ -17,7 +17,11 @@ internal static class ApiEndpoints
     /// <summary>Endpoints REST de clientes (puerto 9090). Dueño: B — Cola y API.</summary>
     public static IEndpointRouteBuilder MapK0sApi(this IEndpointRouteBuilder endpoints)
     {
+        // El catálogo vive en el log replicado, así que cualquier broker puede listarlo sin pasar por el líder.
+        // Se registra directo para que la ruta sea exactamente /v1/topics y no dependa de la barra final del grupo.
+        endpoints.MapGet("/v1/topics", ListTopics);
         RouteGroupBuilder topics = endpoints.MapGroup("/v1/topics");
+        topics.MapGet("/{topic}", GetTopic);
 
         // Lo que escribe en el log o usa el estado de la cola lo atiende el líder. Leer el historial no: los seguidores
         // tienen el log replicado hasta el high watermark.
@@ -37,6 +41,25 @@ internal static class ApiEndpoints
 
         return endpoints;
     }
+
+    /// <summary>Todos los tópicos con su configuración. Es la vista de descubrimiento para los clientes.</summary>
+    private static IResult ListTopics(ITopicCatalog catalog) =>
+        Results.Ok(catalog.List()
+            .OrderBy(topic => topic.Name, StringComparer.Ordinal)
+            .Select(ToResponse)
+            .ToArray());
+
+    /// <summary>Un tópico por nombre. Devuelve 404 si el catálogo no lo tiene.</summary>
+    private static IResult GetTopic(string topic, ITopicCatalog catalog)
+    {
+        TopicConfig? config = catalog.Find(topic);
+        return config is null
+            ? Results.NotFound(new { error = $"El tópico '{topic}' no existe." })
+            : Results.Ok(ToResponse(config));
+    }
+
+    private static TopicResponse ToResponse(TopicConfig config) =>
+        new(config.Name, config.Partitions, config.MaxRetries, (int)config.RetryBackoff.TotalSeconds);
 
     /// <summary>En un seguidor, no ejecuta la ruta: redirige el pedido al líder.</summary>
     private static async ValueTask<object?> LeaderOnlyAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)

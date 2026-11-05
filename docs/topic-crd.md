@@ -4,7 +4,9 @@ Corresponde a la fase 5 de [ARQUITECTURA.md](ARQUITECTURA.md): "Crear tópicos c
 
 ## 1. La idea
 
-Una CustomResourceDefinition le enseña a Kubernetes un tipo de objeto nuevo. Kubernetes ya sabe qué es un `Pod` o un `Lease`; con `deploy/topic-crd.yaml` también sabe qué es un `Topic`: lo valida, lo guarda en etcd y lo muestra con `kubectl get topics`. Pero **no hace nada con él**. El que lo convierte en un tópico del broker es un controlador: `TopicReconciler`, que corre en cada broker y solo actúa en el líder.
+Una CustomResourceDefinition le enseña a Kubernetes un tipo de objeto nuevo. Kubernetes ya sabe qué es un `Pod` o un `Lease`; con `deploy/helm/k0sstreams/crds/topic-crd.yaml` también sabe qué es un `Topic`: lo valida, lo guarda en etcd y lo muestra con `kubectl get topics`. Pero **no hace nada con él**. El que lo convierte en un tópico del broker es un controlador: `TopicReconciler`, que corre en cada broker y solo actúa en el líder.
+
+El chart de Helm instala la CRD desde `crds/` y el Role que necesita el líder para listarla. `deploy/topic-crd.yaml` es la copia para el despliegue sin Helm; las dos tienen que quedar en sync.
 
 Es la única puerta de entrada al catálogo. Un `Topic` termina en `ITopicCatalog.CreateAsync`, que escribe el tópico en `k0s.topics` y espera el quórum ([DEC-003](decisions.md)).
 
@@ -45,9 +47,11 @@ Los valores por defecto son los mismos que en el catálogo: particiones 1, maxRe
 
 | Archivo | Qué es |
 | --- | --- |
-| `deploy/topic-crd.yaml` | La CRD: grupo `k0sstreams.io`, versión `v1`, esquema y columnas de `kubectl get topics` |
+| `deploy/helm/k0sstreams/crds/topic-crd.yaml` | La CRD canónica: grupo `k0sstreams.io`, versión `v1`, esquema y columnas de `kubectl get topics`. Helm la instala desde `crds/` |
+| `deploy/topic-crd.yaml` | Copia de la CRD para el despliegue sin Helm; mantener en sync con la del chart |
+| `deploy/helm/k0sstreams/templates/rbac.yaml` | Role `k0sstreams-topic-reader`: `get,list` sobre `topics.k0sstreams.io` para la ServiceAccount del broker |
+| `deploy/rbac.yaml` | Lo mismo para el despliegue sin Helm (`broker-topic-reader`) |
 | `deploy/examples/topic.yaml` | Un `Topic` de ejemplo. Va en una subcarpeta porque `kubectl apply -f deploy/` no entra en subcarpetas: aplicado en la misma pasada que la CRD, fallaría con `no matches for kind "Topic"` |
-| `deploy/rbac.yaml` | Role `broker-topic-reader`: solo `list` sobre `topics.k0sstreams.io` |
 | `src/K0sStreams.Coordination/TopicReconciler.cs` | El controlador. Se registra junto con la elección por Lease, así que fuera de Kubernetes (compose, `dotnet run`) no corre |
 | `tests/K0sStreams.Coordination.Tests/TopicReconcilerTests.cs` | Pasa por el cliente real de Kubernetes contra un API server falso (`FakeTopicApiServer`) |
 
@@ -56,11 +60,22 @@ Los valores por defecto son los mismos que en el catálogo: particiones 1, maxRe
 ```bash
 dotnet test tests/K0sStreams.Coordination.Tests
 
-# Con el cluster de deploy/ andando (la CRD se aplica con el resto):
+# Con Helm, la CRD y el RBAC se instalan con el chart:
+helm install k0sstreams deploy/helm/k0sstreams -n k0sstreams --create-namespace
+kubectl apply -n k0sstreams -f deploy/examples/topic.yaml
+kubectl get topics -n k0sstreams
+kubectl logs -n k0sstreams <líder> | grep CRD
+
+# La API lista el catálogo (sirve para descubrir tópicos y particiones):
+curl 'http://k0sstreams.k0sstreams.svc.cluster.local:9090/v1/topics'
+curl 'http://k0sstreams.k0sstreams.svc.cluster.local:9090/v1/topics/pedidos'
+
+# Sin Helm, con los manifiestos crudos:
 kubectl apply -f deploy/
 kubectl apply -f deploy/examples/topic.yaml
 kubectl get topics
-kubectl logs <líder> | grep CRD
 ```
+
+Helm instala los CRD pero no los actualiza en un upgrade. Si cambia el esquema, aplicar la CRD a mano (`kubectl apply -f deploy/helm/k0sstreams/crds/topic-crd.yaml`).
 
 Para comprobar que sobrevive al failover: borrar al líder, aplicar otro `Topic` mientras se elige el nuevo y ver que aparece en cuanto el nuevo líder empieza a liderar.

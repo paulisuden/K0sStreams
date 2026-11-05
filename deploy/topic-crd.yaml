@@ -1,3 +1,6 @@
+# Copia para el despliegue sin Helm. La canónica está en deploy/helm/k0sstreams/crds/topic-crd.yaml
+# (Helm la instala desde crds/); mantener ambas en sync.
+#
 # CRD Topic (fase 5): le enseña a Kubernetes qué es un Topic, para crear tópicos con kubectl apply.
 # Kubernetes solo lo guarda; el que lo convierte en tópico es el líder (TopicReconciler, cada 5 s). Ver docs/topic-crd.md.
 #
