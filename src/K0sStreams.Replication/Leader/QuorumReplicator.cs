@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using K0sStreams.Contracts;
 using K0sStreams.Replication.Common;
 using K0sStreams.Replication.Network;
@@ -105,10 +106,12 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
             throw new NotLeaderException("This broker stopped leading before the write was confirmed.");
         }
 
+        long started = Stopwatch.GetTimestamp();
         var waitTask = replication.WaitAsync(offset, ct);
         if (timeout is null)
         {
             await waitTask.ConfigureAwait(false);
+            K0sMetrics.RecordQuorumWait(topic, partition, Stopwatch.GetElapsedTime(started).TotalSeconds, timedOut: false);
             return;
         }
 
@@ -117,9 +120,11 @@ internal sealed partial class QuorumReplicator : IReplicator, IDisposable, IAsyn
         try
         {
             await waitTask.WaitAsync(cts.Token).ConfigureAwait(false);
+            K0sMetrics.RecordQuorumWait(topic, partition, Stopwatch.GetElapsedTime(started).TotalSeconds, timedOut: false);
         }
         catch (OperationCanceledException) when (cts.Token.IsCancellationRequested && !ct.IsCancellationRequested)
         {
+            K0sMetrics.RecordQuorumWait(topic, partition, Stopwatch.GetElapsedTime(started).TotalSeconds, timedOut: true);
             throw new QuorumLostException($"Quorum not reached for {topic} partition {partition} at offset {offset} within {timeout.Value}.");
         }
     }

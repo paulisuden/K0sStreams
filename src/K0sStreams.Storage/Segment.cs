@@ -36,6 +36,9 @@ internal sealed class Segment
     /// <summary>Bytes válidos del archivo, o sea dónde va a caer el próximo registro.</summary>
     public long Length { get; set; }
 
+    /// <summary>Marca de tiempo (ms Unix) del último registro del segmento, o 0 si no tiene registros.</summary>
+    public long LastTimestamp { get; private set; }
+
     /// <summary>Offset que sigue al último que contiene. En un segmento vacío es <see cref="BaseOffset"/>.</summary>
     public long NextOffset => BaseOffset + RecordCount;
 
@@ -54,15 +57,17 @@ internal sealed class Segment
     }
 
     /// <summary>
-    /// Suma un registro al final: lo cuenta, corre el largo y se lo ofrece al índice, que decide si
-    /// le toca anotarlo. Lo usan tanto una escritura nueva como la recuperación al arrancar, así que
-    /// el índice queda igual por los dos caminos.
+    /// Suma un registro al final: lo cuenta, corre el largo, anota la marca de tiempo del último
+    /// registro y se lo ofrece al índice, que decide si le toca anotarlo. Lo usan tanto una escritura
+    /// nueva como la recuperación al arrancar, así que el índice queda igual por los dos caminos.
     /// </summary>
-    public void Append(long position, int size)
+    /// <param name="timestampMs">Marca de tiempo (ms Unix) del registro que se agrega.</param>
+    public void Append(long position, int size, long timestampMs)
     {
         Index.Note(RecordCount, position);
         RecordCount++;
         Length = position + size;
+        LastTimestamp = timestampMs;
     }
 
     /// <summary>Borra del índice los offsets desde <paramref name="fromOffset"/> en adelante.</summary>

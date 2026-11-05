@@ -6,6 +6,8 @@ using K0sStreams.Queue;
 using K0sStreams.Replication;
 using K0sStreams.Storage;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,6 +19,8 @@ builder.Services.AddK0sStorage(builder.Configuration);        // A
 builder.Services.AddK0sQueue(builder.Configuration);          // B
 builder.Services.AddK0sReplication(builder.Configuration);    // C
 builder.Services.AddK0sCoordination(builder.Configuration);   // D
+builder.Services.AddK0sOpenTelemetry(builder.Configuration);  // D — trazado y métricas OpenTelemetry
+builder.Services.AddSingleton<BrokerMetrics>();               // gauges de rol, época, high watermark y lag
 
 builder.Services.AddProblemDetails();
 builder.Services.AddEndpointsApiExplorer();
@@ -39,8 +43,12 @@ app.UseSwaggerUI();
 // Kubernetes detiene el tráfico y reinicia el contenedor.
 app.MapHealthChecks("/health");
 app.MapHealthChecks("/ready");
+app.MapPrometheusScrapingEndpoint();  // Prometheus scrapea /metrics de cada broker
 app.MapK0sApi();            // B
 app.MapK0sReplication();    // C
+
+// Fuerza la creación de los gauges observables antes del primer scrape.
+app.Services.GetRequiredService<BrokerMetrics>();
 
 app.Run();
 

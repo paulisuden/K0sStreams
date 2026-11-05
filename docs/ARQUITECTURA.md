@@ -204,7 +204,6 @@ Cada segmento es un par de archivos: 00000000000000000000.log y .index (offset �
 
 | Método | Ruta | Uso |
 | --- | --- | --- |
-| POST | /v1/topics | Crear tópico {name, partitions, maxRetries, retryBackoff} |
 | POST | /v1/topics/{t}/messages | Publicar {key, value, deliverAt?} → {partition, offset} |
 | GET | /v1/topics/{t}/partitions/{p}/messages?from=&max= | Leer como historial |
 | POST | /v1/topics/{t}/queues/{q}/join | Unirse al grupo de consumidores |

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using K0sStreams.Contracts;
 
 namespace K0sStreams.Storage;
@@ -13,6 +14,9 @@ namespace K0sStreams.Storage;
 /// </remarks>
 internal sealed class GroupCommitWriter
 {
+    private readonly string _topic;
+    private readonly int _partition;
+
     /// <summary>Protege lo de abajo. Es aparte del candado del tópico, que no se sostiene en un await.</summary>
     private readonly Lock _state = new();
 
@@ -25,6 +29,12 @@ internal sealed class GroupCommitWriter
     private long _writtenOffset = Record.Unassigned;
     private long _durableOffset = Record.Unassigned;
     private int _fsyncCount;
+
+    public GroupCommitWriter(string topic, int partition)
+    {
+        _topic = topic;
+        _partition = partition;
+    }
 
     /// <summary>Último offset que el disco ya respalda. Es lo único que el log admite hacia afuera.</summary>
     public long DurableOffset => Volatile.Read(ref _durableOffset);
@@ -120,6 +130,8 @@ internal sealed class GroupCommitWriter
             return;
         }
 
+        long records = Math.Max(0, offset - Volatile.Read(ref _durableOffset));
+        long started = Stopwatch.GetTimestamp();
         try
         {
             FlushToDisk(files);
@@ -129,6 +141,10 @@ internal sealed class GroupCommitWriter
             // Falló el fsync: esos archivos siguen sucios y el próximo commit tiene que reintentarlos.
             Restore(files);
             throw;
+        }
+        finally
+        {
+            K0sMetrics.RecordFsync(_topic, _partition, files.Length, records, Stopwatch.GetElapsedTime(started).TotalSeconds);
         }
 
         lock (_state)

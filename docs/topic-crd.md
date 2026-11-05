@@ -6,7 +6,7 @@ Corresponde a la fase 5 de [ARQUITECTURA.md](ARQUITECTURA.md): "Crear tópicos c
 
 Una CustomResourceDefinition le enseña a Kubernetes un tipo de objeto nuevo. Kubernetes ya sabe qué es un `Pod` o un `Lease`; con `deploy/topic-crd.yaml` también sabe qué es un `Topic`: lo valida, lo guarda en etcd y lo muestra con `kubectl get topics`. Pero **no hace nada con él**. El que lo convierte en un tópico del broker es un controlador: `TopicReconciler`, que corre en cada broker y solo actúa en el líder.
 
-Es otra puerta de entrada al mismo catálogo. `POST /v1/topics` y un `Topic` terminan en `ITopicCatalog.CreateAsync`, que escribe el tópico en `k0s.topics` y espera el quórum ([DEC-003](decisions.md)).
+Es la única puerta de entrada al catálogo. Un `Topic` termina en `ITopicCatalog.CreateAsync`, que escribe el tópico en `k0s.topics` y espera el quórum ([DEC-003](decisions.md)).
 
 ## 2. Por qué listar y no hacer watch
 
@@ -31,14 +31,14 @@ spec:
   retryBackoffSeconds: 5   # ≥ 0; por defecto 5
 ```
 
-Los valores por defecto son los mismos que en `POST /v1/topics`. Kubernetes los completa al guardar, y un `Topic` sin `spec` también vale.
+Los valores por defecto son los mismos que en el catálogo: particiones 1, maxRetries 3, retryBackoff 5 segundos.
 
 **Validación al hacer apply.** El esquema rechaza los rangos inválidos. Los nombres de Kubernetes ya son minúsculas, dígitos, `.` y `-`, y dos reglas CEL suman lo que pide `TopicConfig`: hasta 100 caracteres y que no sea `k0s.topics`. Si algo inválido llegara igual (un cluster sin CEL), el reconciliador lo saltea y lo deja en el log.
 
 ## 4. Lo que no hace
 
 - **Editar un `Topic` no cambia el tópico**, y **borrarlo no borra el tópico.** El catálogo no tiene modificar ni borrar, y el plan no los pide.
-- Si el tópico ya existía (creado por la API), el `Topic` no lo toca, aunque diga otra configuración.
+- Si el tópico ya existía, el `Topic` no lo toca, aunque diga otra configuración.
 - El `Topic` no tiene `status`: el resultado se ve leyendo el tópico (`GET /v1/topics/{nombre}/partitions/0/messages` responde 404 si no existe) o en los logs del líder (`Tópico ... creado desde la CRD Topic`). Escribir un `status` necesitaría permiso de escritura sobre `topics/status`.
 
 ## 5. Piezas

@@ -477,7 +477,7 @@ Related: today `StaticClusterState` makes **every** broker believe it is leader 
 
 ### 10.3 🟠 Topics on followers (A, B, C; open topic #1 in contexto.md)
 
-A topic is created only on the broker that received `POST /v1/topics`, so the followers' `ITopicCatalog` doesn't know about it. If a follower's `Append` checked the catalog, everything would fail with `UNKNOWN_TOPIC`.
+A topic is created via the CRD (or the internal `k0s.topics` log), so all followers learn about it through replication; no broker can receive an append for an unknown topic.
 
 Proposal: in phase 3, followers accept appends for any valid topic name (the log already creates partitions on first write). Longer term, store topic definitions in an internal topic that replicates like any other, which keeps "the log is the only source of truth". `__topics` works as a name because `TopicConfig.IsValidName` rejects a leading `_`, so no user topic can collide with it.
 

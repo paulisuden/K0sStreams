@@ -35,7 +35,6 @@ public sealed class LeaderRoutingTests : IDisposable
     // Con un cuerpo válido: ASP.NET lee el cuerpo antes de correr el filtro que redirige.
     public static TheoryData<string, string, string?> RutasQueEscriben => new()
     {
-        { "POST", "/v1/topics", """{"name":"pedidos"}""" },
         { "POST", "/v1/topics/pedidos/messages", """{"value":"a"}""" },
         { "POST", "/v1/topics/pedidos/queues/facturacion/receive", "{}" },
         { "POST", "/v1/topics/pedidos/queues/facturacion/ack/0/7", null },
@@ -71,16 +70,6 @@ public sealed class LeaderRoutingTests : IDisposable
     }
 
     [Fact]
-    public async Task En_un_seguidor_sin_lider_conocido_responde_503()
-    {
-        HttpClient follower = Follower(leaderAddress: null);
-
-        var response = await follower.PostAsJsonAsync("/v1/topics", new CreateTopicRequest("pedidos"));
-
-        response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-    }
-
-    [Fact]
     public async Task En_un_seguidor_leer_el_historial_no_redirige()
     {
         HttpClient follower = Follower(leaderAddress: "http://broker-0.broker:9090");
@@ -88,25 +77,6 @@ public sealed class LeaderRoutingTests : IDisposable
         var response = await follower.GetAsync(new Uri("/v1/topics/pedidos/partitions/0/messages", UriKind.Relative));
 
         response.StatusCode.Should().NotBe(HttpStatusCode.TemporaryRedirect);
-    }
-
-    [Fact]
-    public async Task Si_deja_de_ser_lider_esperando_el_quorum_redirige_al_nuevo_lider()
-    {
-        var host = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("Broker:DataDir", _dataDir);
-            builder.UseSetting("Coordination:LeaderAddress", "http://broker-2.broker:9090");
-            builder.ConfigureTestServices(services => services.AddSingleton<IReplicator, NotLeaderReplicator>());
-        });
-        _hosts.Add(host);
-        HttpClient leader = host.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
-
-        // Crear el tópico también espera el quórum (se guarda en el log), así que ya ahí se entera.
-        var response = await leader.PostAsJsonAsync("/v1/topics", new CreateTopicRequest("pedidos"));
-
-        response.StatusCode.Should().Be(HttpStatusCode.TemporaryRedirect);
-        response.Headers.Location.Should().Be(new Uri("http://broker-2.broker:9090/v1/topics"));
     }
 
     private HttpClient Follower(string? leaderAddress)

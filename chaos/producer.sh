@@ -23,13 +23,7 @@ post() {
     -H 'Content-Type: application/json' -d "$2"
 }
 
-# 409 también sirve: puede ser el reintento de un 201 cuya respuesta se perdió.
-while :; do
-  case "$(post /v1/topics "{\"name\":\"$topic\"}")" in
-    201 | 409) break ;;
-  esac
-  sleep 1
-done
+# El tópico debe existir ya (creado vía CRD: kubectl apply -f topic.yaml).
 
 end=$(($(date +%s) + seconds))
 i=1

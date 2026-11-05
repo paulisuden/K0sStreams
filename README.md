@@ -69,11 +69,12 @@ Benchmark en minikube de un nodo, directo al líder, mensajes de 100 bytes ([doc
 
 ## API REST
 
-Una vez levantado, la documentación interactiva queda en `http://<host>:9090/swagger`.
+Una vez levantado, la documentación interactiva queda en `http://<host>:9090/swagger` y las
+métricas Prometheus (OpenTelemetry) en `http://<host>:9090/metrics`. El stack de Prometheus +
+Grafana con los tableros está en [`../chaos-lab/observability`](../chaos-lab/observability).
 
 | Método | Ruta | Para qué |
 | --- | --- | --- |
-| `POST` | `/v1/topics` | Crear un tópico |
 | `POST` | `/v1/topics/{t}/messages` | Publicar un mensaje |
 | `GET` | `/v1/topics/{t}/partitions/{p}/messages?from=&max=` | Leer como historial |
 | `POST` | `/v1/topics/{t}/queues/{q}/join` | Unirse al grupo de consumidores |
@@ -86,15 +87,11 @@ Una vez levantado, la documentación interactiva queda en `http://<host>:9090/sw
 | `GET` | `/v1/topics/{t}/queues/{q}/consumers` | Ver consumidores y particiones asignadas |
 | `GET` | `/v1/topics/{t}/queues/{q}/dlq` | Ver mensajes que agotaron los reintentos |
 | `GET` | `/health`, `/ready` | Sondas de Kubernetes |
+| `GET` | `/metrics` | Métricas Prometheus (publicación, lectura, cola, replicación, fsync, rol/época) |
 
 Ejemplo:
 
 ```bash
-# Crear un tópico
-curl -X POST http://localhost:9090/v1/topics \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"pedidos","partitions":1,"maxRetries":3,"retryBackoff":"00:00:05"}'
-
 # Publicar
 curl -X POST http://localhost:9090/v1/topics/pedidos/messages \
   -H 'Content-Type: application/json' \

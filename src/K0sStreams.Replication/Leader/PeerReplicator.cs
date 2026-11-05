@@ -103,6 +103,7 @@ internal sealed partial class PeerReplicator
                         probe = false;
                         _backoff = TimeSpan.Zero;
                         _topic.ReportProgress(_index, match, lastEpoch);
+                        K0sMetrics.SetFollowerLag(_topic.Topic, _topic.Partition, _peerId, end - match);
                     }
                     else if (response.Code == AppendError.LogMismatch)
                     {
@@ -110,6 +111,8 @@ internal sealed partial class PeerReplicator
                         {
                             LogFollowerLostRecords(_owner.Logger, _peerId, _topic.Topic, _topic.Partition, response.EndOffset);
                         }
+
+                        K0sMetrics.RecordAppendFailure(_topic.Topic, _topic.Partition, _peerId);
 
                         // Step back: to just after the follower's end if it's behind, or one record if the record before
                         // the batch conflicts. Retry at once, it's progress.
@@ -120,12 +123,14 @@ internal sealed partial class PeerReplicator
                     else
                     {
                         LogRejected(_owner.Logger, _peerId, _topic.Topic, _topic.Partition, response.Code, response.Error);
+                        K0sMetrics.RecordAppendFailure(_topic.Topic, _topic.Partition, _peerId);
                         probe = true;
                         await BackoffAsync().ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex) when (!_ct.IsCancellationRequested)
                 {
+                    K0sMetrics.RecordAppendFailure(_topic.Topic, _topic.Partition, _peerId);
                     if (_failing)
                     {
                         LogStillFailing(_owner.Logger, _peerId, _topic.Topic, _topic.Partition, ex.Message);

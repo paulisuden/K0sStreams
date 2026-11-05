@@ -1,11 +1,4 @@
 {
   "version": 1,
-  "skills": {
-    "dotnet-webapi": {
-      "source": "dotnet/skills",
-      "sourceType": "github",
-      "skillPath": "plugins/dotnet-aspnetcore/skills/dotnet-webapi/SKILL.md",
-      "computedHash": "9f9ca386ddefb34ebeaf269c6a7dac0bd0a8e9ea901ad5c489cd4d5e7c61fb22"
-    }
-  }
+  "skills": {}
 }

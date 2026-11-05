@@ -31,13 +31,9 @@ export const options = {
   summaryTrendStats: ['med', 'p(95)', 'p(99)'],
 };
 
-// Corre una vez antes que los clientes: crea el tópico si no existe y averigua hasta dónde se puede leer.
+// Corre una vez antes que los clientes: averigua hasta dónde se puede leer.
+// El tópico debe existir ya (creado vía CRD: kubectl apply -f topic.yaml).
 export function setup() {
-  const created = http.post(`${BROKER}/v1/topics`, JSON.stringify({ name: TOPIC }), JSON_BODY);
-  if (created.status !== 201 && created.status !== 409) {
-    throw new Error(`No se pudo crear ${TOPIC}: HTTP ${created.status}`);
-  }
-
   const read = http.get(`${BROKER}/v1/topics/${TOPIC}/partitions/0/messages?from=0&max=1`);
   return { highWatermark: read.json('highWatermark') };
 }

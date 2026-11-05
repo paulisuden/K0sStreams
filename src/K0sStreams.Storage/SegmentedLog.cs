@@ -166,7 +166,7 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
             }
 
             // Recién ahora se actualiza el índice: si la escritura falla, el estado en memoria no miente.
-            segment.Append(segment.Length, bytes.Length);
+            segment.Append(segment.Length, bytes.Length, record.Timestamp);
 
             // Con el stream cerrado, los bytes ya están en el sistema operativo. Desde este punto,
             // un fsync del archivo los baja al disco aunque lo pida otra escritura.
@@ -382,6 +382,8 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
     {
         await log.Writer.CommitPendingAsync().ConfigureAwait(false);
 
+        long cutoffMs = cutoff.ToUnixTimeMilliseconds();
+
         lock (log.Gate)
         {
             // No borrar nada que esté en o antes del high watermark
@@ -390,27 +392,38 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
                 return;
             }
 
-            // Encontrar el primer segmento que podría contener datos después del cutoff
-            // Los segmentos están ordenados por base offset
-            int firstToKeep = -1;
-            for (int i = 0; i < log.Segments.Count; i++)
+            // Los segmentos están ordenados por base offset (más viejo primero).
+            int firstToKeep = 0;
+            while (firstToKeep < log.Segments.Count)
             {
-                var segment = log.Segments[i];
-                // Si el segmento contiene el high watermark o está después, no se toca
+                var segment = log.Segments[firstToKeep];
+
+                // El segmento que contiene el HW y todos los posteriores se protegen.
                 if (segment.Contains(log.HighWatermark))
                 {
-                    firstToKeep = i;
                     break;
                 }
 
-                // Verificar si el último registro del segmento tiene timestamp > cutoff
-                // Para simplificar, usamos una heurística: si el segmento no contiene HW y es viejo, se borra
-                // Una implementación más precisa leería el último registro del segmento
+                // Sin registros, no hay timestamp que consultar: no se borra.
+                if (segment.RecordCount == 0)
+                {
+                    firstToKeep++;
+                    continue;
+                }
+
+                // Si el último registro del segmento es más nuevo que el cutoff, ni este ni los
+                // siguientes (que son aún más recientes) se tocan.
+                if (segment.LastTimestamp > cutoffMs)
+                {
+                    break;
+                }
+
+                firstToKeep++;
             }
 
-            if (firstToKeep <= 0)
+            if (firstToKeep == 0)
             {
-                return; // Nada que borrar o todo está protegido por HW
+                return; // Nada que borrar
             }
 
             // Borrar segmentos antes de firstToKeep
@@ -435,39 +448,50 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
 
         lock (log.Gate)
         {
-            long totalSize = log.Segments.Sum(s => new FileInfo(s.FilePath).Length);
+            long totalSize = log.Segments.Sum(s =>
+            {
+                try { return new FileInfo(s.FilePath).Length; }
+                catch { return 0; }
+            });
             if (totalSize <= maxBytes)
             {
                 return;
             }
 
-            int firstToKeep = -1;
-            long accumulated = 0;
+            // Los segmentos están ordenados por base offset (más viejo primero).
+            int firstToKeep = 0;
+            long keptSize = 0;
 
-            // Empezar desde el segmento más nuevo e ir hacia atrás
-            for (int i = log.Segments.Count - 1; i >= 0; i--)
+            while (firstToKeep < log.Segments.Count)
             {
-                var segment = log.Segments[i];
-                long segSize = new FileInfo(segment.FilePath).Length;
+                var segment = log.Segments[firstToKeep];
+                long segSize;
+                try { segSize = new FileInfo(segment.FilePath).Length; }
+                catch { segSize = 0; }
 
+                // El segmento que contiene el HW y todos los posteriores se protegen.
                 if (segment.Contains(log.HighWatermark))
                 {
-                    // Este segmento contiene el HW: no se puede borrar ni nada anterior
-                    firstToKeep = i;
+                    keptSize += segSize;
+                    firstToKeep++;
                     break;
                 }
 
-                accumulated += segSize;
-                if (totalSize - accumulated <= maxBytes)
+                // Si al conservar este segmento y todos los siguientes ya estamos bajo maxBytes,
+                // nos detenemos aquí.
+                if (totalSize - keptSize - segSize <= maxBytes)
                 {
-                    firstToKeep = i;
                     break;
                 }
+
+                // Este segmento se borra: se descuenta del tamaño total y se avanza.
+                totalSize -= segSize;
+                firstToKeep++;
             }
 
-            if (firstToKeep <= 0)
+            if (firstToKeep == 0)
             {
-                return;
+                return; // Nada que borrar
             }
 
             // Borrar segmentos antes de firstToKeep
@@ -842,7 +866,7 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
                     segment.FilePath, position, $"dice offset {decoded.Offset} y le corresponde {log.NextOffset}");
             }
 
-            segment.Append(position, consumed);
+            segment.Append(position, consumed, decoded.Timestamp);
             position += consumed;
         }
 
@@ -905,6 +929,7 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
             Partition = partition;
             DirectoryPath = Path.Combine(dataDir, topic, $"partition-{partition}");
             CheckpointFile = Path.Combine(DirectoryPath, CheckpointFileName);
+            Writer = new GroupCommitWriter(topic, partition);
         }
 
         /// <summary>Nombre del tópico. Se usa para que los mensajes de log digan de cuál hablan.</summary>
@@ -916,7 +941,7 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
         public Lock Gate { get; } = new();
 
         /// <summary>Quien agrupa los <c>fsync</c> de esta partición y sabe hasta dónde llega el disco.</summary>
-        public GroupCommitWriter Writer { get; } = new();
+        public GroupCommitWriter Writer { get; }
 
         public string DirectoryPath { get; }
 

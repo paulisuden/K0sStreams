@@ -16,18 +16,21 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
 {
     private readonly WebApplicationFactory<Program> _factory;
     private readonly HttpClient _client;
+    private readonly ITopicCatalog _catalog;
 
     public ApiEndpointsTests(WebApplicationFactory<Program> factory)
     {
         _factory = factory;
         _client = factory.CreateClient();
+        _catalog = _factory.Services.GetRequiredService<ITopicCatalog>();
     }
 
     /// <summary>Nombre de tópico único por test, para que los singletons del host no se pisen.</summary>
     private static string NewTopic() => $"t{Guid.NewGuid():N}";
 
-    private Task<HttpResponseMessage> CreateTopicAsync(string name, int partitions = 1) =>
-        _client.PostAsJsonAsync("/v1/topics", new CreateTopicRequest(name, partitions, 3, TimeSpan.FromSeconds(5)));
+    /// <summary>Crea un tópico directamente por el catálogo (la API no expone creación de tópicos; se hace vía CRD).</summary>
+    private ValueTask<bool> CreateTopic(string name, int partitions = 1) =>
+        _catalog.CreateAsync(new TopicConfig(name, partitions, 3, TimeSpan.FromSeconds(5)));
 
     private Task<HttpResponseMessage> PublishAsync(string topic, string value, string? key = null) =>
         _client.PostAsJsonAsync($"/v1/topics/{topic}/messages", new PublishRequest(key, value));
@@ -48,40 +51,10 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
         _client.PostAsJsonAsync($"/v1/topics/{topic}/queues/{queue}/heartbeat", new HeartbeatRequest(consumerId));
 
     [Fact]
-    public async Task Crear_topico_devuelve_created_y_la_configuracion()
-    {
-        string topic = NewTopic();
-
-        var response = await CreateTopicAsync(topic);
-
-        response.StatusCode.Should().Be(HttpStatusCode.Created);
-        TopicResponse? body = await response.Content.ReadFromJsonAsync<TopicResponse>();
-        body!.Name.Should().Be(topic);
-        body.Partitions.Should().Be(1);
-    }
-
-    [Fact]
-    public async Task Crear_topico_repetido_devuelve_conflict()
-    {
-        string topic = NewTopic();
-        await CreateTopicAsync(topic);
-
-        (await CreateTopicAsync(topic)).StatusCode.Should().Be(HttpStatusCode.Conflict);
-    }
-
-    [Fact]
-    public async Task Crear_topico_con_nombre_invalido_devuelve_validation_problem()
-    {
-        var response = await _client.PostAsJsonAsync("/v1/topics", new CreateTopicRequest("NOPE!"));
-
-        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-    }
-
-    [Fact]
     public async Task Publicar_devuelve_offset_creciente_con_particion()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopic(topic);
 
         PublishResponse? first = await (await PublishAsync(topic, "a")).Content.ReadFromJsonAsync<PublishResponse>();
         PublishResponse? second = await (await PublishAsync(topic, "b")).Content.ReadFromJsonAsync<PublishResponse>();
@@ -96,7 +69,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Con_varias_particiones_los_mensajes_se_distribuyen_por_clave()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic, partitions: 3);
+        await CreateTopic(topic, partitions: 3);
 
         var partitions = new List<int>();
         foreach (string key in new[] { "a", "b", "c", "d" })
@@ -121,7 +94,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Leer_devuelve_solo_los_mensajes_hasta_el_high_watermark()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopic(topic);
         await PublishAsync(topic, "a", key: "k1");
         await PublishAsync(topic, "b");
 
@@ -139,7 +112,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Leer_no_saltea_el_primer_mensaje_pasado_el_high_watermark()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopic(topic);
         await PublishAsync(topic, "a");
         // Escrito en el log pero sin quórum todavía: queda pasado el high watermark.
         ILog log = _factory.Services.GetRequiredService<ILog>();
@@ -156,7 +129,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Leer_salta_los_eventos_de_cola_y_no_los_muestra()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopic(topic);
         await PublishAsync(topic, "a");
         await JoinGroupAsync(topic);
         await ReceiveAsync(topic, "consumer-1");
@@ -171,7 +144,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Recibir_devuelve_el_mensaje_y_receive_sin_nada_devuelve_no_content()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopic(topic);
         await PublishAsync(topic, "a");
         await JoinGroupAsync(topic);
 
@@ -188,7 +161,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Ack_confirma_el_mensaje_y_un_ack_repetido_devuelve_not_found()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopic(topic);
         await PublishAsync(topic, "a");
         await JoinGroupAsync(topic);
         var first = await ReceiveAsync(topic, "consumer-1");
@@ -202,7 +175,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Ack_de_un_mensaje_ya_confirmado_no_lo_vuelve_a_entregar()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopic(topic);
         await PublishAsync(topic, "a");
         await JoinGroupAsync(topic);
         var first = await ReceiveAsync(topic, "consumer-1");
@@ -216,7 +189,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Nack_reintenta_y_funciona_en_fase2()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic, 1);
+        await CreateTopic(topic, 1);
         await PublishAsync(topic, "a");
         await JoinGroupAsync(topic);
         var first = await ReceiveAsync(topic, "consumer-1");
@@ -229,7 +202,7 @@ public sealed class ApiEndpointsTests : IClassFixture<WebApplicationFactory<Prog
     public async Task Dlq_puede_listarse()
     {
         string topic = NewTopic();
-        await CreateTopicAsync(topic);
+        await CreateTopic(topic);
 
         var response = await _client.GetAsync($"/v1/topics/{topic}/queues/facturacion/dlq");
         response.StatusCode.Should().Be(HttpStatusCode.OK);

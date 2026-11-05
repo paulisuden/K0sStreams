@@ -45,6 +45,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         var assignment = group.GetAssignment(consumerId);
         if (assignment is null || assignment.Partitions.Count == 0)
         {
+            K0sMetrics.RecordQueueReceive(topic, queue, "not_assigned");
             return null; // Consumer not in group or no partitions assigned
         }
 
@@ -104,6 +105,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                         new QueueEvent(RecordType.Receive, queue, partition, found.Offset, foundUntil.ToUnixTimeMilliseconds()),
                         ct).ConfigureAwait(false);
 
+                    K0sMetrics.RecordQueueReceive(topic, queue, "hit");
                     return new Delivery(partition, found.Offset, found, foundAttempt, foundUntil);
                 }
 
@@ -116,6 +118,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             }
         }
 
+        K0sMetrics.RecordQueueReceive(topic, queue, "empty");
         return null;
     }
 
@@ -133,6 +136,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             topic,
             new QueueEvent(RecordType.Ack, queue, partition, offset, HastaMs: 0),
             ct).ConfigureAwait(false);
+        K0sMetrics.RecordQueueAck(topic, queue);
         return true;
     }
 
@@ -167,6 +171,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                 // UntilMs 0: sin próximo intento. Así Apply lo reconstruye como DLQ y no como un reintento programado.
                 new QueueEvent(RecordType.Nack, queue, partition, offset, HastaMs: 0, reason),
                 ct).ConfigureAwait(false);
+            K0sMetrics.RecordQueueNack(topic, queue, deadLettered: true);
             return true;
         }
 
@@ -184,6 +189,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             topic,
             new QueueEvent(RecordType.Nack, queue, partition, offset, untilMs, reason),
             ct).ConfigureAwait(false);
+        K0sMetrics.RecordQueueNack(topic, queue, deadLettered: false);
         return true;
     }
 

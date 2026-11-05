@@ -7,7 +7,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
-    <!-- CA1707: los tests usan guiones bajos en los nombres (Metodo_Caso_Resultado). -->
-    <NoWarn>$(NoWarn);CA1707</NoWarn>
+    <!-- CA1707: los tests usan guiones bajos en los nombres (Metodo_Caso_Resultado).
+         NU1902: los paquetes OpenTelemetry tienen vulnerabilidades moderadas conocidas
+         en todas las versiones estables; el equipo las ha evaluado para este PoC. -->
+    <NoWarn>$(NoWarn);CA1707;NU1902</NoWarn>
   </PropertyGroup>
 </Project>

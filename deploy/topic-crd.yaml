@@ -1,4 +1,4 @@
-# CRD Topic (fase 5): le enseña a Kubernetes qué es un Topic, para crear tópicos con kubectl apply en vez de POST /v1/topics.
+# CRD Topic (fase 5): le enseña a Kubernetes qué es un Topic, para crear tópicos con kubectl apply.
 # Kubernetes solo lo guarda; el que lo convierte en tópico es el líder (TopicReconciler, cada 5 s). Ver docs/topic-crd.md.
 #
 #   kubectl apply -f deploy/examples/topic.yaml
@@ -47,7 +47,7 @@ spec:
           properties:
             spec:
               type: object
-              # Sin spec, Kubernetes lo completa con los valores por defecto de abajo: los mismos que POST /v1/topics.
+              # Sin spec, Kubernetes lo completa con los valores por defecto de abajo.
               default: {}
               properties:
                 partitions:

@@ -6,6 +6,12 @@
 
   <ItemGroup>
     <PackageReference Include="Swashbuckle.AspNetCore" />
+    <PackageReference Include="OpenTelemetry" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
     <ProjectReference Include="../K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
     <ProjectReference Include="../K0sStreams.Storage/K0sStreams.Storage.csproj" />
     <ProjectReference Include="../K0sStreams.Queue/K0sStreams.Queue.csproj" />

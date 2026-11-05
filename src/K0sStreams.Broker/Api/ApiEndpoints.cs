@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using K0sStreams.Contracts;
 using K0sStreams.Contracts.Api;
@@ -8,6 +9,11 @@ internal static class ApiEndpoints
     /// <summary>Visibilidad por defecto del receive, en segundos, si el cuerpo no la trae.</summary>
     private const int DefaultVisibilitySeconds = 30;
 
+    private static readonly ActivitySource Activity = new(OpenTelemetryExtensions.ActivitySourceName);
+
+    private static byte[] KeyBytes(string? key) =>
+        key is null ? [] : Encoding.UTF8.GetBytes(key);
+
     /// <summary>Endpoints REST de clientes (puerto 9090). Dueño: B — Cola y API.</summary>
     public static IEndpointRouteBuilder MapK0sApi(this IEndpointRouteBuilder endpoints)
     {
@@ -15,7 +21,6 @@ internal static class ApiEndpoints
 
         // Lo que escribe en el log o usa el estado de la cola lo atiende el líder. Leer el historial no: los seguidores
         // tienen el log replicado hasta el high watermark.
-        topics.MapPost("/", CreateTopicAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapPost("/{topic}/messages", PublishAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapGet("/{topic}/partitions/{partition:int}/messages", ReadAsync);
         
@@ -62,24 +67,6 @@ internal static class ApiEndpoints
             ? Results.Problem("No hay un líder conocido; reintentar en unos segundos.", statusCode: StatusCodes.Status503ServiceUnavailable)
             : Results.Redirect(cluster.LeaderAddress.TrimEnd('/') + request.Path + request.QueryString, permanent: false, preserveMethod: true);
 
-    private static async Task<IResult> CreateTopicAsync(
-        CreateTopicRequest request,
-        ITopicCatalog catalog,
-        CancellationToken ct)
-    {
-        TopicConfig config = request.ToConfig();
-        Dictionary<string, string[]> errors = config.Validate();
-        if (errors.Count > 0)
-        {
-            return Results.ValidationProblem(errors);
-        }
-
-        bool created = await catalog.CreateAsync(config, ct).ConfigureAwait(false);
-        return created
-            ? Results.Created($"/v1/topics/{config.Name}", TopicResponse.From(config))
-            : Results.Conflict(new { error = $"El tópico '{config.Name}' ya existe." });
-    }
-
     private static async Task<IResult> PublishAsync(
         string topic,
         PublishRequest request,
@@ -90,6 +77,11 @@ internal static class ApiEndpoints
         TimeProvider time,
         CancellationToken ct)
     {
+        using var activity = Activity.StartActivity("k0sstreams.publish");
+        activity?.SetTag("k0sstreams.topic", topic);
+        activity?.SetTag("k0sstreams.partition", Partitioner.ForKey(KeyBytes(request.Key).AsSpan(),
+            catalog.Find(topic)?.Partitions ?? 1));
+
         if (string.IsNullOrEmpty(request.Value))
         {
             return Results.ValidationProblem(new Dictionary<string, string[]>
@@ -111,20 +103,31 @@ internal static class ApiEndpoints
         TopicConfig topicConfig = catalog.Find(topic)!;
         int partition = Partitioner.ForKey(key.Span, topicConfig.Partitions);
 
-        // Solo el líder escribe. La replicación sube el high watermark cuando hay quórum.
-        long offset = await log.AppendAsync(topic, partition, record, ct).ConfigureAwait(false);
+        long started = Stopwatch.GetTimestamp();
         try
         {
-            // 5 s de espera: si ambos seguidores están caídos, no se bloquea para siempre.
-            await replicator.WaitForQuorumAsync(topic, partition, offset, TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
-        }
-        catch (QuorumLostException)
-        {
-            // Seguimos siendo líder, pero no hay suficientes seguidores para confirmar.
-            return Results.Problem("No se alcanzó el quórum para confirmar la escritura; reintentar.", statusCode: StatusCodes.Status503ServiceUnavailable);
-        }
+            // Solo el líder escribe. La replicación sube el high watermark cuando hay quórum.
+            long offset = await log.AppendAsync(topic, partition, record, ct).ConfigureAwait(false);
+            try
+            {
+                // 5 s de espera: si ambos seguidores están caídos, no se bloquea para siempre.
+                await replicator.WaitForQuorumAsync(topic, partition, offset, TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+            }
+            catch (QuorumLostException)
+            {
+                // Seguimos siendo líder, pero no hay suficientes seguidores para confirmar.
+                K0sMetrics.RecordPublishError(topic);
+                return Results.Problem("No se alcanzó el quórum para confirmar la escritura; reintentar.", statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
-        return Results.Ok(new PublishResponse(partition, offset));
+            K0sMetrics.RecordPublished(topic, partition, Stopwatch.GetElapsedTime(started).TotalSeconds);
+            return Results.Ok(new PublishResponse(partition, offset));
+        }
+        catch
+        {
+            K0sMetrics.RecordPublishError(topic);
+            throw;
+        }
     }
 
     private static async Task<IResult> ReadAsync(
@@ -136,6 +139,10 @@ internal static class ApiEndpoints
         int? max,
         CancellationToken ct)
     {
+        using var activity = Activity.StartActivity("k0sstreams.read");
+        activity?.SetTag("k0sstreams.topic", topic);
+        activity?.SetTag("k0sstreams.partition", partition);
+        activity?.SetTag("k0sstreams.from", from ?? 0);
         if (catalog.Find(topic) is null)
         {
             return Results.NotFound(new { error = $"El tópico '{topic}' no existe." });
@@ -150,6 +157,7 @@ internal static class ApiEndpoints
             });
         }
 
+        long started = Stopwatch.GetTimestamp();
         int limit = max ?? 100;
         long highWatermark = log.HighWatermark(topic, partition);
         var messages = new List<MessageResponse>();
@@ -179,6 +187,7 @@ internal static class ApiEndpoints
                 record.DeliverAt == 0 ? null : DateTimeOffset.FromUnixTimeMilliseconds(record.DeliverAt)));
         }
 
+        K0sMetrics.RecordRead(topic, partition, messages.Count, Stopwatch.GetElapsedTime(started).TotalSeconds);
         return Results.Ok(new ReadResponse(messages, highWatermark, nextOffset));
     }
 
@@ -266,6 +275,10 @@ internal static class ApiEndpoints
         IQueueEngine engine,
         CancellationToken ct)
     {
+        using var activity = Activity.StartActivity("k0sstreams.receive");
+        activity?.SetTag("k0sstreams.topic", topic);
+        activity?.SetTag("k0sstreams.queue", queue);
+        activity?.SetTag("k0sstreams.consumerId", request.ConsumerId);
         if (string.IsNullOrEmpty(request.ConsumerId))
         {
             return Results.ValidationProblem(new Dictionary<string, string[]>
@@ -306,6 +319,12 @@ internal static class ApiEndpoints
         IQueueEngine engine,
         CancellationToken ct)
     {
+        using var activity = Activity.StartActivity("k0sstreams.ack");
+        activity?.SetTag("k0sstreams.topic", topic);
+        activity?.SetTag("k0sstreams.queue", queue);
+        activity?.SetTag("k0sstreams.partition", partition);
+        activity?.SetTag("k0sstreams.offset", offset);
+
         bool acked = await engine.AckAsync(topic, queue, partition, offset, ct).ConfigureAwait(false);
         return acked
             ? Results.Ok(new { topic, queue, partition, offset })
@@ -321,6 +340,12 @@ internal static class ApiEndpoints
         IQueueEngine engine,
         CancellationToken ct)
     {
+        using var activity = Activity.StartActivity("k0sstreams.nack");
+        activity?.SetTag("k0sstreams.topic", topic);
+        activity?.SetTag("k0sstreams.queue", queue);
+        activity?.SetTag("k0sstreams.partition", partition);
+        activity?.SetTag("k0sstreams.offset", offset);
+
         bool nacked = await engine.NackAsync(topic, queue, partition, offset, request?.Reason, ct).ConfigureAwait(false);
         return nacked
             ? Results.Ok(new { topic, queue, partition, offset })
