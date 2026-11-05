@@ -351,3 +351,35 @@ The earlier plan included a chaos suite (`chaos/`) to verify zero confirmed mess
 5. **Provision university k0s cluster** (`cluster_k0s` repo, existing)
 6. **Deploy and validate** end-to-end traces in OpenTelemetry collector
 7. **Document** deployment, troubleshooting, demo script
+## DEC-005 · OpenStack security group port_range 0-0 on all rules
+
+| | |
+| --- | --- |
+| Date | 5 Nov 2026 |
+| Proposed by | adrzanbar |
+| Status | Decided |
+
+### Context
+
+OpenStack Neutron translates a full port range (1-65535) to stored `port_range_min = 0` / `port_range_max = 0` ("any"). When terraform declares `port_range_min = 1` / `port_range_max = 65535`, the provider reads it back from the API as `0/0`, producing a `0 -> 65535` diff that flags `openstack_networking_secgroup_rule_v2` as "must be replaced" on every plan (perpetual replacement cycle). See terraform-provider-openstack#1563.
+
+This also affects MetalLB on k0s: the k0s MetalLB docs state port 7946 (TCP & UDP) must be allowed between nodes for the memberlist protocol, so ICMP/UDP rules must not carry ambiguous port ranges.
+
+### Decision
+
+Set `port_range_min = 0` and `port_range_max = 0` on all three ingress security-group rules (`tcp`, `icmp`, `udp`) in `cluster_k0s/00_nodos_tf/main.tf`, meaning "full range / any port" for each protocol.
+
+### What changes
+
+| Where | Change |
+|---|---|
+| `cluster_k0s/00_nodos_tf/main.tf` | `rules_tcp`, `rules_icmp`, `rules_udp` all carry `port_range_min = 0` / `port_range_max = 0` |
+
+### Evidence
+
+- terraform-provider-openstack/terraform-provider-openstack#1563 — "Setting `port_range_min = 0` and `port_range_max = 0` in terraform when you want the full range."
+- k0s docs (`docs/examples/metallb-loadbalancer.md`) — "Port 7946 (TCP & UDP) must be allowed between the nodes."
+
+### Commit
+
+cluster_k0s: `e0839f2` fix(secgroup): set port_range 0-0 on TCP/ICMP/UDP rules
