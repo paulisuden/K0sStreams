@@ -5,6 +5,7 @@ using K0sStreams.Contracts;
 using K0sStreams.Queue;
 using K0sStreams.Replication;
 using K0sStreams.Storage;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Trace;
@@ -27,7 +28,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHealthChecks()
     // Liveness: el proceso responde. Si falla, Kubernetes reinicia el contenedor.
-    .AddCheck("live", () => HealthCheckResult.Healthy("El broker está en ejecución."))
+    .AddCheck("live", () => HealthCheckResult.Healthy("El broker está en ejecución."), tags: LiveTags)
     // Readiness: el broker puede atender tráfico. Un seguidor sin líder conocido no puede
     // recibir escrituras ni redirigirlas; un broker a mitad de una elección no sabe su rol.
     .AddCheck<ReadyHealthCheck>("ready", tags: ReadyTags);
@@ -38,11 +39,17 @@ app.UseExceptionHandler();
 app.UseSwagger();
 app.UseSwaggerUI();
 
-// /health y /ready ejecutan ambas comprobaciones. "live" siempre pasa si el proceso responde;
-// "ready" falla si no hay líder conocido, así que ambos endpoints devuelven unhealthy y
-// Kubernetes detiene el tráfico y reinicia el contenedor.
-app.MapHealthChecks("/health");
-app.MapHealthChecks("/ready");
+// /health solo corre "live" (el proceso responde) y /ready solo "ready" (hay líder).
+// Si /health corriera también "ready", un broker esperando elección fallaría el liveness,
+// Kubernetes lo reiniciaría y nunca llegaría a liderar.
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("live"),
+});
+app.MapHealthChecks("/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+});
 app.MapPrometheusScrapingEndpoint();  // Prometheus scrapea /metrics de cada broker
 app.MapK0sApi();            // B
 app.MapK0sReplication();    // C
@@ -54,5 +61,6 @@ app.Run();
 
 public partial class Program
 {
+    private static readonly string[] LiveTags = ["live"];
     private static readonly string[] ReadyTags = ["ready"];
 }
