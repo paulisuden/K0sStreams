@@ -11,7 +11,7 @@ What lives where in this project. For the design, see [docs/replication.md](../.
 | `Leader/` | Sends records to the followers, waits for a majority, advances the high watermark | `QuorumReplicator` → `TopicReplication`, `PeerReplicator` | 3 |
 | `Failover/` | Gets a new leader ready without losing a confirmed record | `LeaderPromotion` → `PeerSurvey`, `LogCatchUp`, `EpochChangeWriter` | 4 |
 | `Network/` | How brokers reach each other: the `IReplicationPeer` seam and gRPC (client and server) | `IReplicationPeer`, `GrpcReplicationPeer`, `ReplicationGrpcService` | 2 |
-| `Common/` | Small pieces the others share | `EpochTracker`, `KnownTopics`, `LogTip`, `Backoff`, `SingleLog` | — |
+| `Common/` | Small pieces the others share | `EpochTracker`, `KnownTopics`, `LogTip`, `Backoff` | — |
 
 The tests in `tests/K0sStreams.Replication.Tests` use the same folders. The test helpers are in `Support/`.
 

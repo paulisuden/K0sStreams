@@ -391,16 +391,11 @@ A disagreement on a confirmed record is a protocol bug, and it fails loudly.
 
 **Why it matters.** It's the block's only configuration surface. Checking at startup means a typo in a deployment stops the broker immediately, with a clear message, instead of silently breaking replication later.
 
-### 5.3 `SingleLog`
+### 5.3 Topic and partition validation
 
-[SingleLog.cs](../src/K0sStreams.Replication/Common/SingleLog.cs)
+There is no `SingleLog` anymore. [DEC-001](decisions.md) was a temporary simplification for an earlier increment; the final code keeps partitions. Every replication entry point (`AppendHandler.HandleAsync`, `ReplicationNode.EnsureValid`) checks `TopicConfig.IsValidName(topic)` and `partition >= 0` before touching the log.
 
-**What it does.** Every topic is a single log ([DEC-001](decisions.md)), but `ILog` and `replication.proto` still have a partition until the contracts change. This class pins it to 0 in one place:
-
-- `IsValid(topic, partition)`: a valid topic name (the same rules as topic creation) and no partition other than 0.
-- `ILog` overloads without the partition (`log.EndOffset(topic)`, `log.AppendAsync(topic, record)`…). The rest of the block uses them, so it already reads as it will after the contracts change.
-
-**Why it matters.** Topic names become folder names on disk, and gRPC requests come from the network. Every operation calls `IsValid` before touching the log, so a request for a topic like `../etc` never reaches A's storage code. When the Contracts PR for DEC-001 lands, this file is deleted and nothing else in the block changes.
+**Why it matters.** Topic names become folder names on disk, and gRPC requests come from the network, so a request for a topic like `../etc` must never reach A's storage code. Replication only rejects negative partitions; the API enforces the topic's configured partition count with `Partitioner.ForKey` when producing.
 
 ---
 

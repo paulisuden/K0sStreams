@@ -217,7 +217,7 @@ All of it lives in [AppendHandler.cs](../src/K0sStreams.Replication/Follower/App
 
 ```mermaid
 flowchart LR
-    V{"SingleLog.IsValid<br/>lowercase, digits, . - _<br/>1 to 100 chars, partition 0 only"}
+    V{"TopicConfig.IsValidName<br/>+ partition &gt;= 0<br/>lowercase, digits, . - _<br/>1 to 100 chars"}
     A["Append<br/>topic: ../etc"] --> V
     F["Fetch<br/>topic: Orders"] --> V
     S["GetState<br/>partition: 1"] --> V
@@ -235,11 +235,12 @@ flowchart LR
 | `../etc` | ❌ | Must start with a lowercase letter or digit; `/` is not allowed |
 | `Orders` | ❌ | Uppercase |
 | empty name | ❌ | At least one character |
-| `orders`, partition 1 (or any but 0) | ❌ | Every topic is a single log (DEC-001); 0 is also the protobuf default, so senders can leave it out |
+| `orders`, partition 1 | ✅ | The final scope keeps partitions (DEC-001 was superseded) |
+| `orders`, partition -1 | ❌ | Partitions are non-negative |
 
 **Guardrail.** Every operation validates the address with the same rules as topic creation (`TopicConfig.IsValidName`) before any other step. Because the check runs before taking the topic's lock, junk names don't even create a lock entry in memory.
 
-**Where.** [SingleLog.cs](../src/K0sStreams.Replication/Common/SingleLog.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
+**Where.** `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`, both in [Follower/](../src/K0sStreams.Replication/Follower/).
 
 ---
 

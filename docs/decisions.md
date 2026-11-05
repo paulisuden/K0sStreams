@@ -10,7 +10,7 @@ Decisions that change the scope, the contracts or the design of K0sStreams. Each
 | --- | --- |
 | Date | 7 Oct 2026 |
 | Proposed by | C, Replication |
-| Status | Decided by C. Replication side done (8 Oct 2026). Changes to `Contracts` need the team's agreement (repo rule 3), in one grouped PR. |
+| Status | **Superseded (5 Nov 2026).** This was a temporary simplification for an earlier increment; the final scope kept the original multi-partition design. The decision below is kept for history. |
 
 ### Context
 
@@ -70,7 +70,7 @@ The last row is the key point. In "before", the three partitions all live on the
 | Fakes | `InMemoryLog` keyed by topic only; `InstantReplicator` follows `IReplicator`. |
 | **A**, Storage | One folder per topic, with no partition level. |
 | **B**, Queue and API | Read becomes `GET /v1/topics/{t}/messages?from=&max=`. Ack and nack become `/v1/topics/{t}/queues/{q}/ack/{offset}` and `.../nack/{offset}`; the `fix/ack-nack-partition-en-ruta` branch is no longer needed. Consuming no longer merges partitions. |
-| **C**, Replication | ✅ Done. Validation and locks are per topic. `SingleLog.cs` pins partition 0 and rejects any other until the contracts change; then that file is deleted. |
+| **C**, Replication | ✅ Done at the time. Validation and locks were per topic; `SingleLog.cs` pinned partition 0. Reverted later — see the update at the end of this entry. |
 | **D**, Platform | The `Topic` CRD has no `partitions` field. |
 | Docs | README, ARQUITECTURA.md, contexto.md and the replication docs drop partitions from routes, examples and diagrams. |
 
@@ -106,6 +106,10 @@ Worth mentioning in the defense as the way the design would scale.
 1. Agree on this with the team and merge one PR to `Contracts` with all the contract changes above.
 2. Each block adapts in its own branch. For replication it's a small change, done right after the Contracts PR.
 3. Update the docs listed above.
+
+### Update (5 Nov 2026)
+
+This decision was **not kept in the final scope**. The team kept the original multi-partition design: `TopicConfig.Partitions`, `Partitioner`, `partition` in `ILog`/`IReplicator`/`IQueueEngine`, the `/v1/topics/{t}/partitions/{p}/messages` and `/ack/{p}/{offset}` routes, and `partition-{n}` directories under `/data` are all present. `SingleLog.cs` no longer exists. DEC-004's "multi-partition topics ✅ Done" matches the final code. Treat this entry as historical context for an earlier increment, not as the current design.
 
 ---
 
@@ -294,7 +298,7 @@ The earlier plan included a chaos suite (`chaos/`) to verify zero confirmed mess
 | Consumer group partition assignment | ✅ Done | Horizontal scaling of services |
 | At-least-once delivery + DLQ | ✅ Done | Payment/email reliability |
 | Scheduled messages | ✅ Done | Retry with backoff |
-| Retention (TTL/size) | ❌ **Needed** | Demo runs hours; disk fills without cleanup |
+| Retention (TTL/size) | ⚠️ **Partial** | `RetentionOptions`, background task and k8s config exist, but the deletion logic is incorrect (TTL ignores timestamps; size can delete the HW segment) and has no tests |
 | Offset commit API | ✅ Done | Consumer offset management |
 | TLS/mTLS | ❌ Not needed | Internal cluster only |
 
@@ -302,7 +306,7 @@ The earlier plan included a chaos suite (`chaos/`) to verify zero confirmed mess
 
 | Where | Change |
 |---|---|
-| **Storage** | Add segment deletion by TTL/size (background task) |
+| **Storage** | Fix the retention task: TTL must compare each segment's last-record timestamp (today `cutoff` is ignored), and size-based deletion must keep the newest segments under `MaxBytes` without ever deleting the segment that contains the high watermark. Add dedicated retention tests. |
 | **Contracts** | None |
 | **B**, Queue | No change |
 | **C**, Replication | No change |
@@ -331,7 +335,7 @@ The earlier plan included a chaos suite (`chaos/`) to verify zero confirmed mess
 **Risks**
 
 - Astronomy Shop expects Kafka protocol; K0sStreams uses HTTP API. Need HTTP-to-Kafka adapter or modify demo services to use HTTP API.
-- Retention must be implemented before demo runs for hours.
+- Retention is only scaffolded. The current task deletes every segment before the high-watermark segment instead of applying TTL/size, so a long demo could drop recent data (or keep far less than `MaxBytes`). Fix it and add tests before running for hours.
 - University cluster may have resource limits (CPU/memory/PVC size).
 
 ### Alternatives considered
@@ -344,7 +348,7 @@ The earlier plan included a chaos suite (`chaos/`) to verify zero confirmed mess
 
 ### Next steps
 
-1. **Implement retention** in Storage (TTL + size-based segment deletion)
+1. **Fix retention** in Storage: real TTL (read each segment's last-record timestamp) and size-based deletion (keep the newest segments under `MaxBytes`, never delete the HW segment), with dedicated tests.
 2. **Create K0sStreams Helm chart** (`k0sstreams-helm` repo)
 3. **Fork Astronomy Shop** and adapt to K0sStreams HTTP API (or add Kafka protocol compat)
 4. **Create Astronomy Shop Kustomize** for k0s (`astronomy-shop-k0s` repo)

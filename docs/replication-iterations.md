@@ -140,7 +140,7 @@ The leader side exists:
 
 `IReplicator` is now `QuorumReplicator`. With no peers configured (a single broker), it still confirms at once, so single-broker use is unchanged.
 
-Also in this iteration, every topic is a single log on the replication side ([DEC-001](decisions.md)), with partition 0 pinned in `SingleLog.cs`.
+Also in this iteration, every topic is a single log on the replication side ([DEC-001](decisions.md)), with partition 0 pinned in `SingleLog.cs`. *(Later superseded: the final scope keeps partitions and `SingleLog.cs` no longer exists; see the update to DEC-001.)*
 
 ### What was built
 
@@ -243,7 +243,7 @@ Code in `src/K0sStreams.Replication/`:
 | `PeerDirectory.cs` | One long-lived gRPC channel per broker listed in `Replication:Peers`, except this one. |
 | `EpochTracker.cs` | This broker's epoch for fencing: the highest of D's epoch and the highest epoch accepted from a leader. |
 | `ReplicationOptions.cs` | The `Replication` configuration section (`Peers`, `RpcTimeout`, `MaxBatchRecords`, `MaxBatchBytes`), checked at startup. |
-| `PartitionAddress.cs` | Topic and partition validation shared by all three operations. Replaced by `SingleLog.cs` in [DEC-001](decisions.md). |
+| `PartitionAddress.cs` | Topic and partition validation shared by all three operations. Replaced by `SingleLog.cs` in [DEC-001](decisions.md) (later reverted; validation lives in `AppendHandler` and `ReplicationNode`). |
 | `ServiceCollectionExtensions.cs` | `AddK0sReplication` registers all of the above plus gRPC; `MapK0sReplication` maps the service. |
 
 Tests in `tests/K0sStreams.Replication.Tests/`, 54 in total:

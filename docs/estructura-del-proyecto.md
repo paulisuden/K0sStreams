@@ -1,6 +1,6 @@
 # Estructura del proyecto, explicada desde cero
 
-Pantallazo de qué existe hoy en el repositorio, para alguien que no conoce .NET ni C#.
+Pantallazo de qué existe hoy en el repositorio (actualizado al 5 Nov 2026, fase 5), para alguien que no conoce .NET ni C#.
 Complementa a [ARQUITECTURA.md](ARQUITECTURA.md) (el diseño) y a [contexto.md](contexto.md) (el estado del código).
 
 ---
@@ -31,7 +31,7 @@ La solución: **primero se escribieron solo los contratos**, y todos los firmaro
 
 [src/K0sStreams.Contracts/](../src/K0sStreams.Contracts/) es, entonces, el "idioma común". Contiene:
 
-- **5 contratos**: `ILog` (el log), `IQueueEngine` (la cola), `IReplicator` (copiar a otros brokers), `IClusterState` (quién es el líder), `ITopicCatalog` (qué tópicos existen).
+- **6 contratos**: `ILog` (el log), `IQueueEngine` (la cola), `IReplicator` (copiar a otros brokers), `ILeaderPromotion` (puesta al día al asumir como líder), `IClusterState` (quién es el líder), `ITopicCatalog` (qué tópicos existen).
 - **Los tipos de datos compartidos**: [Record.cs](../src/K0sStreams.Contracts/Record.cs) (un mensaje), [RecordType.cs](../src/K0sStreams.Contracts/RecordType.cs), [TopicConfig.cs](../src/K0sStreams.Contracts/TopicConfig.cs).
 - **Dos piezas de lógica real ya terminada**:
   - [RecordCodec.cs](../src/K0sStreams.Contracts/RecordCodec.cs) — convierte un mensaje a bytes y al revés. Es el formato exacto de los bytes en disco (largo, CRC para detectar corrupción, offset, época, clave, valor). Es el archivo más grande del repo, 154 líneas, y **está funcionando**.
@@ -51,57 +51,62 @@ K0sStreams/
 ├─ Dockerfile                   ← cómo empaquetar el broker en una imagen
 ├─ .github/workflows/ci.yml     ← compila + testea + arma la imagen en cada push
 ├─ src/                         ← el código
-│  ├─ K0sStreams.Contracts/     ← el idioma común  ✅ HECHO
-│  ├─ K0sStreams.Storage/       ← log en disco     ⬜ VACÍO (dueño: A)
-│  ├─ K0sStreams.Queue/         ← motor de cola    ⬜ VACÍO (dueño: B)
-│  ├─ K0sStreams.Replication/   ← gRPC + quórum    ⬜ VACÍO (dueño: C)
-│  ├─ K0sStreams.Coordination/  ← líder y épocas   ⬜ VACÍO (dueño: D)
-│  └─ K0sStreams.Broker/        ← el EJECUTABLE    🟡 esqueleto
-└─ tests/                       ← un proyecto de tests por cada uno de arriba
+│  ├─ K0sStreams.Contracts/     ← el idioma común        ✅ HECHO
+│  ├─ K0sStreams.Storage/       ← log en disco           ✅ HECHO
+│  ├─ K0sStreams.Queue/         ← motor de cola          ✅ HECHO
+│  ├─ K0sStreams.Replication/   ← gRPC + quórum          ✅ HECHO
+│  ├─ K0sStreams.Coordination/  ← líder y épocas         ✅ HECHO
+│  └─ K0sStreams.Broker/        ← el EJECUTABLE          ✅ HECHO
+├─ tests/                       ← un proyecto de tests por cada proyecto de src/
+├─ deploy/                      ← manifiestos de Kubernetes (StatefulSet, Services, RBAC, CRD, observabilidad)
+├─ chaos/                       ← suite de caos
+└─ bench/                       ← benchmark con k6
 ```
 
 Los 5 primeros de `src/` son **librerías** (no se ejecutan solas). El único programa que se ejecuta es `K0sStreams.Broker`, y su trabajo es *juntar las piezas*.
 
-## 4. Los 4 proyectos "vacíos" no están del todo vacíos
+## 4. Cada bloque se enchufa con una línea
 
-Cada uno tiene exactamente **un** archivo: `ServiceCollectionExtensions.cs`. Ese nombre raro es un patrón de .NET; mirá [el de Storage](../src/K0sStreams.Storage/ServiceCollectionExtensions.cs):
-
-```csharp
-services.AddSingleton<ILog, InMemoryLog>();
-```
-
-Se lee así: *"cuando alguien pida un `ILog`, dale un `InMemoryLog`, y que sea siempre el mismo objeto (`Singleton`)"*.
-
-Eso es **inyección de dependencias**: hay un registro central de "qué pieza concreta cumple cada contrato". El resto del código nunca dice `new InMemoryLog()`; solo pide "necesito un `ILog`" y recibe lo que esté registrado.
-
-Por eso el reemplazo de un fake por lo real es literalmente **una línea**:
+Cada proyecto tiene un `ServiceCollectionExtensions.cs` que registra sus implementaciones en el contenedor de dependencias. Ya no son fakes: [Storage](../src/K0sStreams.Storage/ServiceCollectionExtensions.cs) registra `SegmentedLog` como `ILog`, [Queue](../src/K0sStreams.Queue/ServiceCollectionExtensions.cs) registra `QueueEngine` como `IQueueEngine`, y así cada bloque.
 
 ```csharp
-services.AddSingleton<ILog, SegmentedLog>();   // antes: InMemoryLog
+services.AddSingleton<ILog, SegmentedLog>();          // A
+services.AddSingleton<IQueueEngine, QueueEngine>();   // B
 ```
 
-Y ahí está la gracia del diseño: los 4 pueden trabajar en paralelo sin pisarse, porque cada uno toca solo su archivo.
+Se lee así: *"cuando alguien pida un `ILog`, dale un `SegmentedLog`, y que sea siempre el mismo objeto (`Singleton`)"*.
+
+Eso es **inyección de dependencias**: hay un registro central de "qué pieza concreta cumple cada contrato". El resto del código nunca dice `new SegmentedLog()`; solo pide "necesito un `ILog`" y recibe lo que esté registrado. `Program.cs` llama una vez a `AddK0sStorage`, `AddK0sQueue`, `AddK0sReplication` y `AddK0sCoordination`, y no necesita saber qué clase concreta hay detrás.
+
+Los fakes de [Contracts/Fakes](../src/K0sStreams.Contracts/Fakes/) siguen existiendo para los tests y para correr sin Kubernetes (docker compose o `dotnet run`).
 
 ## 5. El ejecutable: `Broker`
 
-[Program.cs](../src/K0sStreams.Broker/Program.cs) tiene 34 líneas y es el "main". Lo único que hace:
+[Program.cs](../src/K0sStreams.Broker/Program.cs) tiene 50 líneas y es el "main". Lo que hace:
 
 1. Llama una vez al registro de cada bloque (`AddK0sStorage`, `AddK0sQueue`, `AddK0sReplication`, `AddK0sCoordination`).
 2. Prende Swagger (la web que documenta y permite probar la API).
 3. Publica `/health` y `/ready` (las dos URLs que Kubernetes consulta para saber si el pod está vivo).
-4. Llama a `MapK0sApi()` y `MapK0sReplication()` — **que hoy no registran ninguna ruta**.
+4. Llama a `MapK0sApi()` y `MapK0sReplication()`.
 
-El comentario del archivo dice que `Program.cs` no debería editarse más: ya está terminado.
+El comentario del archivo dice que `Program.cs` no debería editarse más: cada bloque se registra solo.
 
-[Api/ApiEndpoints.cs](../src/K0sStreams.Broker/Api/ApiEndpoints.cs) son 11 líneas con un `// Mapear acá las rutas` adentro. O sea: **la API REST del README todavía no existe**. Si corrés el broker hoy, responde `/health`, `/ready` y Swagger vacío, y nada más.
+[Api/ApiEndpoints.cs](../src/K0sStreams.Broker/Api/ApiEndpoints.cs) tiene las rutas REST: crear tópicos, publicar, leer historial por partición, y la cola con grupos de consumidores, ack/nack, offsets y DLQ. `MapK0sReplication()` expone el servicio gRPC del puerto 9091.
 
-[appsettings.json](../src/K0sStreams.Broker/appsettings.json) es la configuración: abre el puerto **9090** para clientes (HTTP/1) y el **9091** para brokers entre sí (HTTP/2, que gRPC exige).
+[appsettings.json](../src/K0sStreams.Broker/appsettings.json) es la configuración: abre el puerto **9090** para clientes (HTTP/1) y el **9091** para brokers entre sí (HTTP/2, que gRPC exige). [appsettings.k8s.json](../src/K0sStreams.Broker/appsettings.k8s.json) agrega la configuración del cluster (retención, réplicas, Lease y `/data`).
 
 ## 6. Los tests
 
-Un proyecto de tests por cada proyecto de `src/`, con la misma lógica: `K0sStreams.Storage.Tests` prueba `K0sStreams.Storage`. Cuatro de ellos están vacíos (solo el `.csproj`), esperando que haya código que probar.
+Hay 6 proyectos de tests, uno por cada proyecto de `src/`. Todos tienen tests:
 
-Los **39 tests que sí existen** están casi todos en `K0sStreams.Contracts.Tests`: verifican el formato de bytes, los eventos de cola, el particionador, la validación de nombres de tópico y el fake del log. Más [HostTests.cs](../tests/K0sStreams.Broker.Tests/HostTests.cs), que comprueba que el broker arranca y que cada contrato tenga alguien registrado.
+- `K0sStreams.Contracts.Tests`: formato de bytes, eventos de cola, particionador y validación de nombres de tópico.
+- `K0sStreams.Storage.Tests`: segmentos, índice disperso, group commit, rotación, recuperación, corrupción, high watermark y catálogo de tópicos.
+- `K0sStreams.Queue.Tests`: estados de la cola, timeouts, reintentos, DLQ y grupos de consumidores.
+- `K0sStreams.Replication.Tests`: append/fetch/getState, quórum, fencing, failover y gRPC entre brokers.
+- `K0sStreams.Coordination.Tests`: Lease, épocas, elección de líder y reconciliación de la CRD Topic.
+- `K0sStreams.Broker.Tests`: arranque del host, rutas REST y redirección al líder.
+
+La suite completa se corre con `dotnet test` y es la que valida el CI.
 
 ## 7. Las reglas del repo que te van a morder
 
@@ -116,6 +121,6 @@ Están en [Directory.Build.props](../Directory.Build.props) y son estrictas a pr
 
 ## Resumen en una frase
 
-Lo que existe es **el andamio y el idioma común, no el broker**: están definidos todos los contratos, el formato binario real de los mensajes, versiones de juguete en memoria de las 4 piezas grandes, el ejecutable que las enchufa, los tests de lo definido, el Dockerfile y el CI. Lo que falta es el 90% del trabajo real: el log en disco, el motor de cola, las rutas HTTP, el servidor gRPC, la elección de líder y los manifiestos de Kubernetes.
+El broker está completo: log en disco con segmentos, índice, CRC, group commit y recuperación; cola con ack/nack, reintentos, DLQ y grupos de consumidores; API REST; replicación gRPC con quórum 2 de 3; elección de líder por Lease con épocas y fencing; manifiestos de Kubernetes, suite de caos y benchmark.
 
-Según el plan del README, la **fase 1 vencía el 07/10** con un broker funcionando de punta a punta. Hoy el repo está en fase 0.
+El README marca la fase 5 (caos, CRD Topic y benchmark) como implementada. Lo que queda es la demo: corregir la retención, adaptar el OpenTelemetry Astronomy Shop a la API de K0sStreams y desplegar la comparación con Kafka.

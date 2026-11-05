@@ -207,9 +207,14 @@ Cada segmento es un par de archivos: 00000000000000000000.log y .index (offset �
 | POST | /v1/topics | Crear tópico {name, partitions, maxRetries, retryBackoff} |
 | POST | /v1/topics/{t}/messages | Publicar {key, value, deliverAt?} → {partition, offset} |
 | GET | /v1/topics/{t}/partitions/{p}/messages?from=&max= | Leer como historial |
+| POST | /v1/topics/{t}/queues/{q}/join | Unirse al grupo de consumidores |
+| POST | /v1/topics/{t}/queues/{q}/leave | Salir del grupo |
+| POST | /v1/topics/{t}/queues/{q}/heartbeat | Renovar pertenencia y asignación |
 | POST | /v1/topics/{t}/queues/{q}/receive | Tomar el próximo trabajo |
-| POST | /v1/topics/{t}/queues/{q}/ack/{offset} | Confirmar |
-| POST | /v1/topics/{t}/queues/{q}/nack/{offset} | Devolver con motivo |
+| POST | /v1/topics/{t}/queues/{q}/ack/{p}/{offset} | Confirmar |
+| POST | /v1/topics/{t}/queues/{q}/nack/{p}/{offset} | Devolver con motivo |
+| POST | /v1/topics/{t}/queues/{q}/offsets | Confirmar offset de lectura por partición |
+| GET | /v1/topics/{t}/queues/{q}/consumers | Ver consumidores y particiones asignadas |
 | GET | /v1/topics/{t}/queues/{q}/dlq | Ver mensajes muertos |
 | GET | /health, /ready, /swagger | Sondas de Kubernetes y documentación |
 

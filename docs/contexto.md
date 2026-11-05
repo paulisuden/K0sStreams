@@ -2,20 +2,22 @@
 
 Qué hay hoy en el repositorio, dónde trabaja cada integrante y qué tener en cuenta al programar cada bloque. Complementa a [ARQUITECTURA.md](ARQUITECTURA.md), que explica el diseño; este documento explica el código.
 
-## 1. Qué está hecho (fase 0)
+## 1. Qué está hecho (fase 5)
 
 | Pieza | Dónde | Estado |
 | --- | --- | --- |
 | Solución y proyectos | `K0sStreams.slnx`, `src/`, `tests/` | 6 proyectos + 1 proyecto de tests por cada uno |
 | Contratos | `src/K0sStreams.Contracts/` | Interfaces, formato de registro, eventos de cola, particionador, DTOs REST, `.proto` |
-| Fakes en memoria | `src/K0sStreams.Contracts/Fakes/` | `InMemoryLog`, `InMemoryTopicCatalog`, `InstantReplicator`, `StaticClusterState` |
-| Registro por bloque | `ServiceCollectionExtensions.cs` en cada proyecto | Hoy registran los fakes |
-| Host del broker | `src/K0sStreams.Broker/Program.cs` | Solo `/health`, `/ready` y Swagger. Sin rutas REST ni gRPC todavía |
-| Tests | `tests/` | 39 tests: formato de registro, eventos de cola, particionador, validación de tópicos, `InMemoryLog`, sondas del host y registro de servicios |
-| Docker | `Dockerfile` | Multi-etapa, corre sin root, datos en `/data`. **Nunca se construyó localmente** |
+| Fakes en memoria | `src/K0sStreams.Contracts/Fakes/` | `InMemoryLog`, `InMemoryTopicCatalog`, `InstantReplicator`, `StaticClusterState` (tests y modo local) |
+| Registro por bloque | `ServiceCollectionExtensions.cs` en cada proyecto | Registran las implementaciones reales (`SegmentedLog`, `QueueEngine`, `QuorumReplicator`, `LeaseClusterState`) |
+| Host del broker | `src/K0sStreams.Broker/Program.cs` | `/health`, `/ready`, Swagger, API REST y gRPC de replicación |
+| Tests | `tests/` | Suite completa por bloque: Contracts, Storage, Queue, Replication, Coordination y Broker |
+| Docker | `Dockerfile` | Multi-etapa, corre sin root, datos en `/data` |
 | CI | `.github/workflows/ci.yml` | Build, tests e imagen Docker en cada push a `main` y en cada PR |
+| Kubernetes | `deploy/` | StatefulSet de 3 brokers, Services, RBAC, CRD Topic, observabilidad y Strimzi |
+| Caos y benchmark | `chaos/`, `bench/` | Suite de caos y benchmark k6 |
 
-Lo que **no** está: el log en disco, el motor de cola, las rutas REST, el servidor gRPC, el Lease, los manifiestos de Kubernetes (`deploy/`), la suite de caos (`chaos/`) y el CLAUDE.md.
+Las piezas que faltan son las de la demo: corregir la retención (ver §7), adaptar el Astronomy Shop a la API HTTP de K0sStreams y desplegar la comparación con Kafka. El resto del broker (log en disco, cola, API REST, gRPC, Lease, CRD y despliegue) está implementado.
 
 ## 2. Cómo arrancar
 
@@ -29,6 +31,8 @@ dotnet run --project src/K0sStreams.Broker
 Requisitos: .NET SDK 10. `global.json` acepta cualquier 10.0.x a partir de 10.0.100.
 
 ## 3. Dónde trabaja cada uno
+
+> Esta sección describe el reparto original del trabajo. Las implementaciones reales ya reemplazaron a los fakes en producción; los fakes quedan para los tests y para correr sin Kubernetes.
 
 Cada bloque tiene su rama `feature/<bloque>` y sus propios archivos. `Program.cs` llama una vez al método de registro de cada bloque y **no debería editarse más**.
 
@@ -91,7 +95,7 @@ Los contratos están en `src/K0sStreams.Contracts/` y tienen comentarios XML. Es
 ### `IQueueEngine` — B
 
 - `maxRetries` cuenta los reintentos **después** del primer intento, así que un mensaje se entrega como máximo `maxRetries + 1` veces antes de ir a la DLQ.
-- Ack y nack reciben la **partición**, porque con más de una partición el offset solo no identifica al mensaje. En REST va como `?partition=` y vale 0 por defecto.
+- Ack y nack reciben la **partición**, porque con más de una partición el offset solo no identifica al mensaje. En REST va en la ruta: `/ack/{partition}/{offset}` y `/nack/{partition}/{offset}`.
 - Devuelven `false` si el mensaje no estaba en proceso en esa cola. La API responde 404 en ese caso.
 - Cada cola es un grupo de consumidores independiente: dos colas del mismo tópico reciben cada una todos los mensajes.
 - La cola solo entrega mensajes hasta el high watermark.
@@ -143,9 +147,9 @@ Los contratos están en `src/K0sStreams.Contracts/` y tienen comentarios XML. Es
 
 ## 7. Temas abiertos que conviene resolver pronto
 
-1. **¿Quién persiste los tópicos?** `ITopicCatalog` quedó registrado en Storage (A), pero el documento no lo asigna. Además, crear un tópico tiene que replicarse. Una opción coherente con "el log es la única fuente de verdad" es un tópico interno de metadatos.
-2. **Compactación del log.** No está definido cuándo se borran segmentos viejos ni qué pasa con los eventos de cola ya confirmados. Sin compactación, `Apply` tarda cada vez más al reconstruir la cola.
+1. **Persistencia de los tópicos.** Resuelto con [DEC-003](decisions.md): el catálogo vive en el tópico interno `k0s.topics`, en el mismo log y replicado por quórum (`LogTopicCatalog`).
+2. **Compactación del log.** La retención está a medio implementar: existen `RetentionOptions` y la tarea en background, pero `DeleteOldSegmentsByTimeAsync` ignora el `cutoff` (borra todo lo anterior al segmento del high watermark) y `DeleteOldSegmentsBySizeAsync` puede borrar ese mismo segmento. Hay que corregir ambas políticas y agregar tests. La compactación de los eventos de cola ya confirmados sigue sin definirse; sin ella, `Apply` puede tardar cada vez más al reconstruir la cola.
 3. **Lecturas en un líder aislado.** El fencing por época frena las escrituras de un líder viejo, pero no sus lecturas. Conviene que un líder deje de atender cuando pasó un tiempo sin poder renovar el Lease.
 4. **Lecturas en seguidores.** Pueden estar un poco atrasadas respecto del líder: hay que decidir si se permiten y documentarlo.
 5. **HW en los seguidores.** El seguidor recibe `leader_hw` en cada `Append` y tiene que guardarlo, para servir lecturas correctas y para cuando pase a ser líder.
-6. **Pendientes de la fase 0**: escribir el CLAUDE.md (D), confirmar que el CI pasa en GitHub y construir la imagen Docker al menos una vez (`docker build -t k0sstreams/broker .`).
+6. **Pendientes de la entrega**: informe, video y presentación (fase 6 del plan del README).

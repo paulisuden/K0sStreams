@@ -14,10 +14,10 @@ Un productor publica mensajes en un **tópico**. Esos mensajes se pueden consumi
 
 | Modo | Parecido a | Cómo funciona |
 | --- | --- | --- |
-| **Historial** | Kafka | El consumidor lee desde el offset que quiera (`?from=150`) y puede releer todo las veces que necesite. |
+| **Historial** | Kafka | El consumidor elige la partición y lee desde el offset que quiera (`?from=150`); puede releer todo las veces que necesite. |
 | **Cola de trabajo** | Amazon SQS | Cada mensaje se entrega a un solo consumidor, que lo confirma (`ack`) o lo devuelve (`nack`). Hay reintentos con espera creciente, mensajes programados y una cola de mensajes muertos (DLQ). |
 
-Por dentro, cada tópico es un **log append-only en disco** y se replica en los 3 brokers. Un mensaje se confirma al productor cuando está guardado en al menos 2 de los 3.
+Por dentro, cada tópico se divide en una o más **particiones**, cada una un **log append-only en disco**, y se replica en los 3 brokers. Un mensaje se confirma al productor cuando está guardado en al menos 2 de los 3.
 
 ## Arquitectura en una mirada
 
@@ -76,9 +76,14 @@ Una vez levantado, la documentación interactiva queda en `http://<host>:9090/sw
 | `POST` | `/v1/topics` | Crear un tópico |
 | `POST` | `/v1/topics/{t}/messages` | Publicar un mensaje |
 | `GET` | `/v1/topics/{t}/partitions/{p}/messages?from=&max=` | Leer como historial |
+| `POST` | `/v1/topics/{t}/queues/{q}/join` | Unirse al grupo de consumidores |
+| `POST` | `/v1/topics/{t}/queues/{q}/leave` | Salir del grupo |
+| `POST` | `/v1/topics/{t}/queues/{q}/heartbeat` | Renovar pertenencia y asignación |
 | `POST` | `/v1/topics/{t}/queues/{q}/receive` | Tomar el próximo trabajo de la cola |
-| `POST` | `/v1/topics/{t}/queues/{q}/ack/{offset}` | Confirmar que se procesó |
-| `POST` | `/v1/topics/{t}/queues/{q}/nack/{offset}` | Devolverlo para reintentar |
+| `POST` | `/v1/topics/{t}/queues/{q}/ack/{p}/{offset}` | Confirmar que se procesó |
+| `POST` | `/v1/topics/{t}/queues/{q}/nack/{p}/{offset}` | Devolverlo para reintentar |
+| `POST` | `/v1/topics/{t}/queues/{q}/offsets` | Confirmar el offset de lectura por partición |
+| `GET` | `/v1/topics/{t}/queues/{q}/consumers` | Ver consumidores y particiones asignadas |
 | `GET` | `/v1/topics/{t}/queues/{q}/dlq` | Ver mensajes que agotaron los reintentos |
 | `GET` | `/health`, `/ready` | Sondas de Kubernetes |
 
@@ -100,10 +105,10 @@ curl 'http://localhost:9090/v1/topics/pedidos/partitions/0/messages?from=0&max=1
 
 # Consumir como cola
 curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/receive
-curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/ack/0
+curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/ack/0/0
 ```
 
-> Los cuerpos de ejemplo siguen el diseño acordado; pueden ajustarse cuando se implemente la API.
+> Los ejemplos usan la API implementada; la referencia completa está en Swagger.
 
 ## Estructura del repositorio
 
