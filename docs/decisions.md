@@ -219,13 +219,13 @@ The topic catalog lived only in memory (`InMemoryTopicCatalog`, open issue 1 in 
 
 ---
 
-## DEC-004 · Demo application: OpenTelemetry Astronomy Shop on k0s cluster
+## DEC-004 · Demo: OpenTelemetry Astronomy Shop on k0s cluster; drop chaos suite
 
 | | |
 |---|---|
 | Date | 28 Oct 2026 |
 | Proposed by | Team (teacher requirement: multi-repo distributed system on university k0s cluster) |
-| Status | Decided. Replaces earlier "generic demo" plan. |
+| Status | Decided. Replaces earlier "generic demo" plan and drops the chaos suite (`chaos/`) from the deliverables. |
 
 ### Context
 
@@ -235,9 +235,11 @@ The teacher requires the final deliverable to be a **working distributed system 
 2. Multiple services communicating via the custom message-oriented middleware (K0sStreams)
 3. The system actually working end-to-end, not just unit tests
 
+The earlier plan included a chaos suite (`chaos/`) to verify zero confirmed message loss under broker failures. The team decided to drop that suite and instead validate K0sStreams as a Kafka replacement by running the Astronomy Shop demo end-to-end on the university cluster.
+
 ### Decision
 
-**Use the OpenTelemetry Astronomy Shop (OTel demo) as the demo application**, deployed on the university k0s cluster with K0sStreams replacing Kafka.
+**Use the OpenTelemetry Astronomy Shop (OTel demo) as the demo application**, deployed on the university k0s cluster with K0sStreams replacing Kafka. The chaos suite (`chaos/`) is dropped from the deliverables; failure-injection verification is folded into the Astronomy Shop deployment testing instead.
 
 ### Why OpenTelemetry Astronomy Shop
 
