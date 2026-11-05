@@ -168,6 +168,19 @@ kubectl apply -f deploy/examples/topic.yaml
 kubectl get topics
 ```
 
+**Helm (chart en `deploy/helm/k0sstreams`):**
+
+Cada push a `main` publica `ghcr.io/paulisuden/k0sstreams-broker:sha-<short>` y
+actualiza el tag del chart. Después de un `git pull`:
+
+```bash
+helm upgrade --install k0sstreams deploy/helm/k0sstreams \
+  --namespace k0sstreams --create-namespace
+```
+
+Si el paquete de GHCR queda privado, crear un `imagePullSecret` y pasarlo como
+`imagePullSecrets` en `values.yaml`.
+
 ## Plan de desarrollo
 
 Se construye de abajo hacia arriba: primero el log, después la cola y la API, al final la parte distribuida. Cada fase termina con algo demostrable.
