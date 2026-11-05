@@ -108,11 +108,16 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
   {{- if .Values.persistence.enabled }}
+  # Ojo: volumeClaimTemplates es inmutable en un StatefulSet. Solo labels estables
+  # (sin helm.sh/chart ni app.kubernetes.io/version) para que un bump del chart no
+  # intente cambiar el spec y falle con "updates to statefulset spec ... forbidden".
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
         labels:
-          {{- include "k0sstreams.labels" . | nindent 10 }}
+          {{- include "k0sstreams.selectorLabels" . | nindent 10 }}
       spec:
         accessModes:
           {{- toYaml .Values.persistence.accessModes | nindent 10 }}
