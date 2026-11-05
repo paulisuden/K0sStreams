@@ -1,0 +1,24 @@
+apiVersion: v2
+name: k0sstreams
+description: A Helm chart for K0sStreams distributed message broker on Kubernetes
+
+type: application
+
+# "appVersion" lo reescribe el workflow con el sha de la imagen publicada.
+version: 0.2.0
+appVersion: "latest"
+
+keywords:
+  - k0s
+  - streams
+  - broker
+  - messaging
+  - kubernetes
+
+home: https://github.com/paulisuden/K0sStreams
+sources:
+  - https://github.com/paulisuden/K0sStreams/tree/main/deploy/helm/k0sstreams
+
+maintainers:
+  - name: adrzanbar
+    email: adrzanbar@users.noreply.github.com

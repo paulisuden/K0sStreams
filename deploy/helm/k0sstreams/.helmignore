@@ -1,0 +1,24 @@
+# Patterns to ignore when building packages.
+# This supports shell glob matching, relative path matching, and
+# negation (prefixed with !). Only one pattern per line.
+.DS_Store
+# Common VCS directories
+.git/
+.gitignore
+# Bazaar version control markup
+.bzr/
+# Mercurial version control markup
+.hg/
+# Subversion version control markup
+.svn/
+# Common temporary files
+*.swp
+*.bak
+*.tmp
+*~
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
