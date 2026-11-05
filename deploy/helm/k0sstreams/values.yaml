@@ -9,7 +9,7 @@ image:
   # y después reescribe "tag" con el sha de esa imagen.
   repository: ghcr.io/paulisuden/k0sstreams-broker
   pullPolicy: IfNotPresent
-  tag: "sha-b179f80"
+  tag: "sha-c0d4a2b"
 
 # Si el paquete de GHCR queda privado, crear el secret en el namespace y listarlo acá.
 imagePullSecrets: []

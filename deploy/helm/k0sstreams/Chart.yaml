@@ -6,7 +6,7 @@ type: application
 
 # "appVersion" lo reescribe el workflow con el sha de la imagen publicada.
 version: 0.2.0
-appVersion: "sha-b179f80"
+appVersion: "sha-c0d4a2b"
 
 keywords:
   - k0s
