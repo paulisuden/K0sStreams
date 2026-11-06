@@ -222,3 +222,45 @@ The topic catalog lived only in memory (`InMemoryTopicCatalog`, open issue 1 in 
 
 - **Derive the topics from the logs on disk.** Simpler, but the configuration the client asked for (`maxRetries`, `retryBackoff`) would be lost.
 - **A file next to the log.** Breaks "everything on disk goes through `ILog`", and would need its own replication.
+
+---
+
+## DEC-004 · Delivery state is ephemeral; only the cursor and the DLQ are durable
+
+| | |
+| --- | --- |
+| Date | 6 Nov 2026 |
+| Proposed by | B, Queue and API |
+| Status | Accepted and implemented on `fix/original-scope` (merged to `main`). |
+
+### Context
+
+The original queue engine stored every delivery transition (`receive`, `ack`, `nack`, `timeout`) as a record in the same log as the messages, replicated by quorum. Consuming one message therefore cost three confirmed writes:
+
+1. the publish (leader + follower fsync),
+2. the `Receive` event,
+3. the `Ack` event.
+
+The log also grew with consumption instead of traffic, and rebuilding the queue depended on the whole delivery history.
+
+### Decision
+
+Delivery state (leases, visibility, attempt counts, scheduled retries) lives in the leader's memory. The only durable queue state is:
+
+- the committed cursor per queue/partition, written as `OffsetCommit` records in batches (about once per second), and
+- DLQ markers.
+
+`receive` and `ack` no longer write to the log. If the leader changes, unacknowledged deliveries are redelivered: the guarantee is at-least-once. The cursor advances only over the contiguous acknowledged prefix, never over a gap.
+
+### Consequences
+
+- A message costs about one confirmed write (the publish) plus amortized cursor commits, instead of three.
+- The log grows with traffic, not with consumption.
+- A failover can redeliver messages acknowledged since the last cursor flush (up to ~1 s).
+- Exact reconstruction of in-flight state is lost; redelivery replaces it.
+- `Apply` only replays `OffsetCommit` and DLQ markers; legacy delivery events are ignored.
+
+### Alternatives considered
+
+- **Commit the cursor on every ack.** Stronger durability window, but returns to a per-message quorum write and loses the throughput gain.
+- **Keep event sourcing for delivery state.** The previous design: exact reconstruction, at three writes per message and unbounded history.
