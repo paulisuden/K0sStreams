@@ -12,9 +12,11 @@ public sealed record Delivery(int Partition, long Offset, Record Message, int At
 public sealed record DeadLetter(int Partition, long Offset, Record Message, int Attempts, string? LastReason);
 
 /// <summary>
-/// Semántica de cola (tipo SQS) sobre el log. Cada cola es un grupo de consumidores independiente:
-/// dos colas del mismo tópico reciben cada una todos los mensajes.
-/// Cada transición se escribe en el log como <see cref="QueueEvent"/>, así un nuevo líder reconstruye el estado.
+/// Semántica de cola (tipo SQS) sobre el log. Cada cola es independiente: dos colas del
+/// mismo tópico reciben cada una todos los mensajes.
+/// Lo durable es el log de mensajes, el cursor confirmado y las marcas de DLQ. La entrega
+/// en proceso, la visibilidad y los reintentos son estado efímero del líder: si cambia,
+/// lo no confirmado se vuelve a entregar (at-least-once).
 /// </summary>
 public interface IQueueEngine
 {

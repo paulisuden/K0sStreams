@@ -906,15 +906,19 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
     /// <summary>Estado de una partición de un tópico: sus segmentos en orden y hasta dónde está confirmado.</summary>
     private sealed class TopicLog
     {
-        public TopicLog(string dataDir, string topic)
+        public TopicLog(string dataDir, string topic, int partition = 0)
         {
             Topic = topic;
+            Partition = partition;
             DirectoryPath = Path.Combine(dataDir, topic);
             CheckpointFile = Path.Combine(DirectoryPath, CheckpointFileName);
         }
 
         /// <summary>Nombre del tópico. Se usa para que los mensajes de log digan de cuál hablan.</summary>
         public string Topic { get; }
+
+        /// <summary>En este alcance hay un solo log por tópico; la partición es siempre 0.</summary>
+        public int Partition { get; }
 
         public Lock Gate { get; } = new();
 

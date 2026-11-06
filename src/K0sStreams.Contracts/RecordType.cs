@@ -9,4 +9,5 @@ public enum RecordType : byte
     Nack = 3,
     Timeout = 4,
     EpochChange = 5,
+    OffsetCommit = 6,
 }

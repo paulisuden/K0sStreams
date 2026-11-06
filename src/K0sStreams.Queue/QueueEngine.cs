@@ -4,22 +4,41 @@ using K0sStreams.Contracts;
 namespace K0sStreams.Queue;
 
 /// <summary>
-/// Motor de cola (tipo SQS) sobre el log. El estado de cada cola vive en el log como
-/// <see cref="QueueEvent"/>; este tipo solo lo materializa para responder rápido, y
-/// <see cref="Apply"/> lo reconstruye cuando un broker nuevo se vuelve líder.
+/// Motor de cola (tipo SQS) sobre el log. Lo durable es el log de mensajes, el cursor
+/// confirmado de cada cola y las marcas de DLQ. La entrega en proceso, la visibilidad y
+/// los reintentos viven en memoria: si el líder cambia, lo no confirmado se vuelve a
+/// entregar (at-least-once).
 /// </summary>
-/// <param name="log">Log append-only. Única fuente de verdad.</param>
+/// <param name="log">Log append-only. Única fuente de verdad de los mensajes.</param>
 /// <param name="catalog">Tópicos existentes y su configuración.</param>
 /// <param name="cluster">Rol y época de este broker.</param>
-/// <param name="replicator">Confirma cada evento de cola por quórum, igual que un mensaje.</param>
-/// <param name="time">Reloj, inyectado para poder probar el visibility timeout.</param>
+/// <param name="replicator">Confirma los offsets y las marcas de DLQ por quórum.</param>
+/// <param name="time">Reloj, inyectado para poder probar visibilidad y auto-commit.</param>
 public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState cluster, IReplicator replicator, TimeProvider time) : IQueueEngine, IDisposable
 {
+    /// <summary>Ventana máxima de acks que se pueden perder en un failover.</summary>
+    private static readonly TimeSpan AutoCommitInterval = TimeSpan.FromSeconds(1);
+
+    private const int BatchSize = 512;
+
+    /// <summary>
+    /// En este alcance hay un solo log por tópico (la partición es 0). El contrato conserva
+    /// la partición para poder particionar en el futuro.
+    /// </summary>
+    private const int LogPartition = 0;
+
     private readonly ConcurrentDictionary<string, QueueState> _queues = new(StringComparer.Ordinal);
 
-    // Época en la que se releyó cada tópico desde el log, y un semáforo para que se relea una sola vez (ver EnsureRebuiltAsync).
+    // Offsets confirmados por (tópico/cola/partición). Solo se alimenta de eventos OffsetCommit.
+    private readonly ConcurrentDictionary<string, long> _committedOffsets = new(StringComparer.Ordinal);
+
+    // Época en la que se releyó cada tópico desde el log, y un semáforo para que se relea una sola vez.
     private readonly ConcurrentDictionary<string, long> _rebuiltInEpoch = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _rebuilding = new(1, 1);
+
+    // Serializa los volcados de offsets para no escribir dos veces el mismo cursor.
+    private readonly SemaphoreSlim _flushing = new(1, 1);
+    private DateTimeOffset _lastFlush = DateTimeOffset.MinValue;
 
     /// <inheritdoc />
     public async ValueTask<Delivery?> ReceiveAsync(string topic, string queue, TimeSpan visibility, CancellationToken ct = default)
@@ -29,73 +48,70 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             throw new ArgumentOutOfRangeException(nameof(visibility), visibility, "La visibilidad tiene que ser mayor que cero.");
         }
 
-        TopicConfig? topicConfig = catalog.Find(topic) ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
-        await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
-        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
-
-        // Se lee hasta el high watermark, no hasta el end offset: un mensaje que todavía no
-        // llegó a quórum no se puede entregar. Los eventos de cola del log se saltean.
-        int partitions = topicConfig.Partitions;
-        long from = 0;
-        foreach (int partition in PartitionsRange(partitions))
+        if (catalog.Find(topic) is null)
         {
-            long highWatermark = log.HighWatermark(topic, partition);
-            if (highWatermark < 0)
+            throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+        }
+
+        await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
+        await MaybeFlushAsync(ct).ConfigureAwait(false);
+
+        QueueState state = StateOf(topic, queue);
+
+        // Se lee hasta el high watermark: un mensaje que todavía no llegó a quórum no se entrega.
+        DateTimeOffset now = time.GetUtcNow();
+        DateTimeOffset visibleUntil = now.Add(visibility);
+
+        long highWatermark = log.HighWatermark(topic, LogPartition);
+        if (highWatermark < 0)
+        {
+            return null;
+        }
+
+        long scanFrom = state.ScanFrom(LogPartition);
+        while (scanFrom <= highWatermark)
+        {
+            Record? found = null;
+            long lastScanned = scanFrom - 1;
+            int foundAttempt = 0;
+
+            await foreach (var record in log.ReadAsync(topic, LogPartition, scanFrom, BatchSize, ct).ConfigureAwait(false))
             {
-                continue;
+                lastScanned = record.Offset;
+                if (record.Type != RecordType.Message)
+                {
+                    // Los marcadores de offset/DLQ ocupan un offset del log pero no se entregan.
+                    state.MarkResolved(LogPartition, record.Offset);
+                    continue;
+                }
+
+                if (record.DeliverAt > 0 && record.DeliverAt > now.ToUnixTimeMilliseconds())
+                {
+                    continue;
+                }
+
+                int? attempt = state.TryBeginAttempt(LogPartition, record.Offset, now, visibleUntil);
+                if (attempt is null)
+                {
+                    continue;
+                }
+
+                found = record;
+                foundAttempt = attempt.Value;
+                break;
             }
 
-            long scanFrom = from == 0 ? 0 : from;
-            while (scanFrom <= highWatermark)
+            if (found is not null)
             {
-                Record? found = null;
-                long lastScanned = scanFrom - 1;
-                int foundAttempt = 0;
-                DateTimeOffset foundUntil = default;
-                await foreach (var record in log.ReadAsync(topic, partition, scanFrom, BatchSize, ct).ConfigureAwait(false))
-                {
-                    lastScanned = record.Offset;
-                    if (record.Type != RecordType.Message)
-                    {
-                        continue;
-                    }
-
-                    DateTimeOffset now = time.GetUtcNow();
-                    if (record.DeliverAt > 0 && record.DeliverAt > now.ToUnixTimeMilliseconds())
-                    {
-                        continue;
-                    }
-
-                    DateTimeOffset visibleUntil = now.Add(visibility);
-                    int? attempt = state.TryBeginAttempt(partition, record.Offset, now, visibleUntil);
-                    if (attempt is null)
-                    {
-                        continue;
-                    }
-
-                    found = record;
-                    foundAttempt = attempt.Value;
-                    foundUntil = visibleUntil;
-                    break;
-                }
-
-                if (found is not null)
-                {
-                    await AppendEventAsync(
-                        topic,
-                        new QueueEvent(RecordType.Receive, queue, partition, found.Offset, foundUntil.ToUnixTimeMilliseconds()),
-                        ct).ConfigureAwait(false);
-
-                    return new Delivery(partition, found.Offset, found, foundAttempt, foundUntil);
-                }
-
-                if (lastScanned < scanFrom)
-                {
-                    break;
-                }
-
-                scanFrom = lastScanned + 1;
+                return new Delivery(LogPartition, found.Offset, found, foundAttempt, visibleUntil);
             }
+
+            if (lastScanned < scanFrom)
+            {
+                break;
+            }
+
+            scanFrom = lastScanned + 1;
         }
 
         return null;
@@ -105,16 +121,15 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
     public async ValueTask<bool> AckAsync(string topic, string queue, int partition, long offset, CancellationToken ct = default)
     {
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
-        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
-        if (!state.TryAcknowledge(partition, offset))
+
+        QueueState state = StateOf(topic, queue);
+        if (!state.TryAcknowledge(partition, offset, out long cursor))
         {
             return false;
         }
 
-        await AppendEventAsync(
-            topic,
-            new QueueEvent(RecordType.Ack, queue, partition, offset, UntilMs: 0),
-            ct).ConfigureAwait(false);
+        // El ack es memoria; el cursor se vuelve durable en el próximo volcado.
+        state.MarkDirty(partition, cursor);
         return true;
     }
 
@@ -128,7 +143,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
 
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
-        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
+
+        QueueState state = StateOf(topic, queue);
         int? attempt = state.GetAttempt(partition, offset);
         if (attempt is null || attempt.Value == 0)
         {
@@ -141,14 +157,12 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
 
         DateTimeOffset now = time.GetUtcNow();
+
         if (attempt.Value > topicConfig.MaxRetries)
         {
-            state.MarkDeadLetter(partition, offset);
-            await AppendEventAsync(
-                topic,
-                // UntilMs 0: sin próximo intento. Así Apply lo reconstruye como DLQ y no como un reintento programado.
-                new QueueEvent(RecordType.Nack, queue, partition, offset, UntilMs: 0, reason),
-                ct).ConfigureAwait(false);
+            // La DLQ es el único evento de entrega que sí es un hecho durable.
+            state.MarkDeadLetter(partition, offset, reason);
+            await AppendDlqMarkerAsync(topic, queue, partition, offset, reason, ct).ConfigureAwait(false);
             return true;
         }
 
@@ -158,14 +172,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         {
             delay = topicConfig.RetryBackoff;
         }
-        DateTimeOffset retryAt = now.Add(delay);
-        long untilMs = retryAt.ToUnixTimeMilliseconds();
-        state.ScheduleRetry(partition, offset, retryAt);
 
-        await AppendEventAsync(
-            topic,
-            new QueueEvent(RecordType.Nack, queue, partition, offset, untilMs, reason),
-            ct).ConfigureAwait(false);
+        state.ScheduleRetry(partition, offset, now.Add(delay));
         return true;
     }
 
@@ -177,9 +185,9 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             return [];
         }
 
-        // El contrato es sincrónico: se espera la relectura igual que GetDeadLetters ya espera la lectura del log.
+        // El contrato es sincrónico: se espera la relectura igual que antes.
         EnsureRebuiltAsync(topic, CancellationToken.None).AsTask().GetAwaiter().GetResult();
-        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
+        QueueState state = StateOf(topic, queue);
         return state.GetDeadLetters(topic, queue, log);
     }
 
@@ -192,19 +200,44 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             return;
         }
 
-        var replayed = QueueEvent.FromRecord(queueEvent);
-        QueueState state = _queues.GetOrAdd(Key(topic, replayed.Queue), _ => new QueueState());
-        state.Apply(replayed);
+        QueueEvent replayed = QueueEvent.FromRecord(queueEvent);
+        QueueState state = StateOf(topic, replayed.Queue);
+
+        switch (replayed.Type)
+        {
+            // Los eventos de entrega de versiones anteriores se ignoran: esa información
+            // ya no es durable y su único efecto correcto es volver a entregar.
+            case RecordType.OffsetCommit:
+                _committedOffsets.AddOrUpdate(
+                    Key(topic, replayed.Queue, replayed.Partition),
+                    replayed.TargetOffset,
+                    (_, existing) => Math.Max(existing, replayed.TargetOffset));
+                state.SetCommitted(replayed.Partition, replayed.TargetOffset);
+                break;
+
+            case RecordType.Nack when replayed.UntilMs == 0:
+                state.ApplyDeadLetter(replayed.Partition, replayed.TargetOffset, replayed.Reason);
+                break;
+        }
     }
 
-    public void Dispose() => _rebuilding.Dispose();
+    public void Dispose()
+    {
+        _rebuilding.Dispose();
+        _flushing.Dispose();
+    }
+
+    private QueueState StateOf(string topic, string queue) =>
+        _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
 
     private static string Key(string topic, string queue) => $"{topic}/{queue}";
 
+    private static string Key(string topic, string queue, int partition) => $"{topic}/{queue}/{partition}";
+
     /// <summary>
-    /// Relee del log los eventos de cola del tópico la primera vez que se usa en cada época. La memoria puede no coincidir
-    /// con el log, que es la fuente de verdad, al arrancar (está vacía) y al cambiar de líder (otro líder pudo escribir
-    /// eventos mientras tanto).
+    /// Relee del log los eventos durables del tópico la primera vez que se usa en cada época.
+    /// Solo interesan los offsets confirmados y las marcas de DLQ; el resto es información
+    /// de entrega que, por diseño, no se conserva.
     /// </summary>
     private async ValueTask EnsureRebuiltAsync(string topic, CancellationToken ct)
     {
@@ -214,7 +247,6 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             return;
         }
 
-        // Uno a la vez: si dos pedidos releyeran a la vez, cada evento se aplicaría dos veces.
         await _rebuilding.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -223,6 +255,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                 return;
             }
 
+            // El estado en memoria es del líder anterior; se descarta y se reconstruye.
             foreach (string key in _queues.Keys.Where(key => key.StartsWith(topic + "/", StringComparison.Ordinal)))
             {
                 _queues.TryRemove(key, out _);
@@ -237,11 +270,12 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
     }
 
-    private bool IsRebuilt(string topic, long epoch) => _rebuiltInEpoch.TryGetValue(topic, out long rebuilt) && rebuilt == epoch;
+    private bool IsRebuilt(string topic, long epoch) =>
+        _rebuiltInEpoch.TryGetValue(topic, out long rebuilt) && rebuilt == epoch;
 
     /// <summary>
-    /// Aplica todos los eventos del log, no solo hasta el high watermark: un líder nuevo termina confirmando todo su log.
-    /// Solo la partición 0, porque cada tópico es un solo log (DEC-001).
+    /// Recorre el log del tópico y aplica solo los eventos durables. Un líder nuevo termina
+    /// confirmando todo su log, por eso no se corta en el high watermark.
     /// </summary>
     private async ValueTask ReplayAsync(string topic, CancellationToken ct)
     {
@@ -249,7 +283,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         while (true)
         {
             int read = 0;
-            await foreach (var record in log.ReadAsync(topic, 0, next, BatchSize, ct).ConfigureAwait(false))
+            await foreach (var record in log.ReadAsync(topic, LogPartition, next, BatchSize, ct).ConfigureAwait(false))
             {
                 Apply(topic, record);
                 next = record.Offset + 1;
@@ -258,58 +292,161 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
 
             if (read == 0)
             {
-                return;
+                break;
             }
         }
     }
 
-    private static IEnumerable<int> PartitionsRange(int partitions)
+    /// <summary>
+    /// Vuelca los cursores sucios si pasó la ventana de auto-commit. Se llama desde
+    /// <see cref="ReceiveAsync"/>: una cola se consume en bucle, así que el volcado
+    /// ocurre solo, sin un temporizador de fondo.
+    /// </summary>
+    private async ValueTask MaybeFlushAsync(CancellationToken ct)
     {
-        for (int i = 0; i < partitions; i++)
+        if (time.GetUtcNow() - _lastFlush < AutoCommitInterval)
         {
-            yield return i;
+            return;
+        }
+
+        await FlushAsync(ct).ConfigureAwait(false);
+    }
+
+    private async ValueTask FlushAsync(CancellationToken ct)
+    {
+        if (!await _flushing.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        try
+        {
+            _lastFlush = time.GetUtcNow();
+            if (!cluster.IsLeader)
+            {
+                return;
+            }
+
+            foreach ((string topic, string queue, QueueState state) in SnapshotQueues())
+            {
+                foreach ((int partition, long cursor) in state.DirtySnapshot())
+                {
+                    try
+                    {
+                        await AppendCommitAsync(topic, queue, partition, cursor, ct).ConfigureAwait(false);
+                        state.ClearDirty(partition, cursor);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // Queda sucio: se reintenta en la próxima ventana.
+                        state.MarkDirty(partition, cursor);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _flushing.Release();
         }
     }
 
-    /// <summary>
-    /// Escribe el evento y espera el quórum antes de responder, igual que un mensaje: si el líder cayera antes, el
-    /// nuevo líder podría no tener, por ejemplo, un ack ya confirmado al cliente, y volvería a entregar el mensaje.
-    /// </summary>
-    private async ValueTask AppendEventAsync(string topic, QueueEvent queueEvent, CancellationToken ct)
+    private IEnumerable<(string Topic, string Queue, QueueState State)> SnapshotQueues()
     {
-        long offset = await log.AppendAsync(
-            topic,
-            queueEvent.Partition,
-            queueEvent.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
-            ct).ConfigureAwait(false);
-        await replicator.WaitForQuorumAsync(topic, queueEvent.Partition, offset, ct).ConfigureAwait(false);
+        foreach ((string key, QueueState state) in _queues)
+        {
+            int separator = key.IndexOf('/');
+            if (separator > 0)
+            {
+                yield return (key[..separator], key[(separator + 1)..], state);
+            }
+        }
     }
 
-    private const int BatchSize = 512;
+    private async ValueTask AppendCommitAsync(string topic, string queue, int partition, long offset, CancellationToken ct)
+    {
+        QueueEvent commitEvent = QueueEvent.ConfirmarOffset(queue, partition, offset);
 
-    /// <summary>Estado materializado de una cola, reconstruible desde el log.</summary>
+        long commitOffset = await log.AppendAsync(
+            topic,
+            partition,
+            commitEvent.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
+            ct).ConfigureAwait(false);
+
+        await replicator.WaitForQuorumAsync(topic, partition, commitOffset, ct).ConfigureAwait(false);
+
+        _committedOffsets.AddOrUpdate(
+            Key(topic, queue, partition),
+            offset,
+            (_, existing) => Math.Max(existing, offset));
+    }
+
+    private async ValueTask AppendDlqMarkerAsync(string topic, string queue, int partition, long offset, string? reason, CancellationToken ct)
+    {
+        QueueEvent marker = new(RecordType.Nack, queue, partition, offset, UntilMs: 0, reason);
+
+        long markerOffset = await log.AppendAsync(
+            topic,
+            partition,
+            marker.ToRecord(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
+            ct).ConfigureAwait(false);
+
+        await replicator.WaitForQuorumAsync(topic, partition, markerOffset, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Estado materializado de una cola. Lo durable es solo el cursor; el resto es efímero.</summary>
     private sealed class QueueState
     {
         private readonly object _gate = new();
-        private readonly Dictionary<(int Partition, long Offset), int> _attempts = [];
-        private readonly Dictionary<(int Partition, long Offset), DateTimeOffset> _visibleUntil = [];
+
+        // Último offset confirmado (durable, viene del log).
+        private readonly Dictionary<int, long> _committed = [];
+
+        // Último offset resuelto de forma contigua (acks y eventos internos).
+        private readonly Dictionary<int, long> _prefix = [];
+
+        private readonly Dictionary<(int Partition, long Offset), DateTimeOffset> _inFlight = [];
         private readonly Dictionary<(int Partition, long Offset), DateTimeOffset> _scheduledUntil = [];
-        private readonly HashSet<(int Partition, long Offset)> _inFlight = [];
-        private readonly HashSet<(int Partition, long Offset)> _acknowledged = [];
+        private readonly Dictionary<(int Partition, long Offset), int> _attempts = [];
+        private readonly HashSet<(int Partition, long Offset)> _done = [];
         private readonly HashSet<(int Partition, long Offset)> _deadLettered = [];
         private readonly Dictionary<(int Partition, long Offset), string?> _lastReason = [];
+        private readonly HashSet<int> _dirty = [];
+
+        /// <summary>Primer offset que hay que mirar en una partición: nada por debajo se entrega.</summary>
+        public long ScanFrom(int partition)
+        {
+            lock (_gate)
+            {
+                long committed = _committed.GetValueOrDefault(partition, -1);
+                long prefix = _prefix.GetValueOrDefault(partition, -1);
+                return Math.Max(committed, prefix) + 1;
+            }
+        }
+
+        public void SetCommitted(int partition, long offset)
+        {
+            lock (_gate)
+            {
+                _committed[partition] = Math.Max(_committed.GetValueOrDefault(partition, -1), offset);
+                _prefix[partition] = Math.Max(_prefix.GetValueOrDefault(partition, -1), offset);
+                _dirty.Remove(partition);
+            }
+        }
 
         /// <summary>
-        /// Decide y confirma el intento bajo el mismo lock: si fueran dos pasos, dos receives
-        /// concurrentes podrían pasar la comprobación y entregar el mismo offset.
-        /// Devuelve el número de intento, o null si el mensaje no está disponible.
+        /// Decide y registra el intento bajo el mismo lock: si fueran dos pasos, dos receives
+        /// concurrentes podrían entregar el mismo offset.
         /// </summary>
         public int? TryBeginAttempt(int partition, long offset, DateTimeOffset now, DateTimeOffset visibleUntil)
         {
             lock (_gate)
             {
                 var key = (partition, offset);
-                if (_acknowledged.Contains(key) || _deadLettered.Contains(key))
+                if (_done.Contains(key) || _deadLettered.Contains(key))
                 {
                     return null;
                 }
@@ -318,44 +455,39 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                 {
                     return null;
                 }
-                if (_scheduledUntil.ContainsKey(key) && now >= scheduled)
-                {
-                    _scheduledUntil.Remove(key);
-                }
 
-                // En proceso y sin vencer: todavía no se puede volver a entregar.
-                if (_inFlight.Contains(key))
+                if (_inFlight.TryGetValue(key, out DateTimeOffset until))
                 {
-                    if (_visibleUntil.TryGetValue(key, out DateTimeOffset until2) && now < until2)
+                    if (now < until)
                     {
                         return null;
                     }
+
                     _inFlight.Remove(key);
-                    _visibleUntil.Remove(key);
                 }
 
-                _inFlight.Add(key);
-                _visibleUntil[key] = visibleUntil;
                 _attempts.TryGetValue(key, out int attempt);
                 attempt++;
                 _attempts[key] = attempt;
+                _inFlight[key] = visibleUntil;
                 return attempt;
             }
         }
 
-        public bool TryAcknowledge(int partition, long offset)
+        public bool TryAcknowledge(int partition, long offset, out long cursor)
         {
             lock (_gate)
             {
                 var key = (partition, offset);
                 if (!_inFlight.Remove(key))
                 {
+                    cursor = 0;
                     return false;
                 }
 
-                _visibleUntil.Remove(key);
                 _scheduledUntil.Remove(key);
-                _acknowledged.Add(key);
+                _done.Add(key);
+                cursor = AdvancePrefix(partition);
                 return true;
             }
         }
@@ -365,22 +497,13 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 var key = (partition, offset);
-                if (_acknowledged.Contains(key) || _deadLettered.Contains(key))
+                if (_done.Contains(key) || _deadLettered.Contains(key))
                 {
                     return null;
-                }
-
-                if (!_inFlight.Contains(key) && !_scheduledUntil.ContainsKey(key))
-                {
-                    // could be in-flight? check
                 }
 
                 _attempts.TryGetValue(key, out int attempt);
-                if (attempt == 0)
-                {
-                    return null;
-                }
-                return attempt;
+                return attempt == 0 ? null : attempt;
             }
         }
 
@@ -389,14 +512,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 var key = (partition, offset);
-                if (!_inFlight.Contains(key))
-                {
-                    return false;
-                }
-
-                _inFlight.Remove(key);
-                _visibleUntil.Remove(key);
-                return true;
+                return _inFlight.Remove(key);
             }
         }
 
@@ -406,17 +522,80 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             {
                 var key = (partition, offset);
                 _inFlight.Remove(key);
-                _visibleUntil.Remove(key);
                 _scheduledUntil[key] = until;
             }
         }
 
-        public void MarkDeadLetter(int partition, long offset)
+        public void MarkDeadLetter(int partition, long offset, string? reason)
+        {
+            lock (_gate)
+            {
+                var key = (partition, offset);
+                _inFlight.Remove(key);
+                _scheduledUntil.Remove(key);
+                _deadLettered.Add(key);
+                _done.Add(key);
+                _lastReason[key] = reason;
+                long cursor = AdvancePrefix(partition);
+                if (cursor > _committed.GetValueOrDefault(partition, -1))
+                {
+                    _dirty.Add(partition);
+                }
+            }
+        }
+
+        /// <summary>Marca un offset que no es un mensaje (commit, marcador de DLQ) como resuelto.</summary>
+        public void MarkResolved(int partition, long offset)
+        {
+            lock (_gate)
+            {
+                var key = (partition, offset);
+                if (_done.Add(key))
+                {
+                    AdvancePrefix(partition);
+                }
+            }
+        }
+
+        public void MarkDirty(int partition, long cursor)
+        {
+            lock (_gate)
+            {
+                if (cursor > _committed.GetValueOrDefault(partition, -1))
+                {
+                    _dirty.Add(partition);
+                }
+            }
+        }
+
+        public IReadOnlyList<(int Partition, long Cursor)> DirtySnapshot()
+        {
+            lock (_gate)
+            {
+                return [.. _dirty.Select(partition => (partition, _prefix.GetValueOrDefault(partition, -1)))];
+            }
+        }
+
+        public void ClearDirty(int partition, long cursor)
+        {
+            lock (_gate)
+            {
+                if (_prefix.GetValueOrDefault(partition, -1) == cursor)
+                {
+                    _dirty.Remove(partition);
+                }
+            }
+        }
+
+        public void ApplyDeadLetter(int partition, long offset, string? reason)
         {
             lock (_gate)
             {
                 var key = (partition, offset);
                 _deadLettered.Add(key);
+                _done.Add(key);
+                _lastReason[key] = reason;
+                AdvancePrefix(partition);
             }
         }
 
@@ -425,80 +604,50 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 var result = new List<DeadLetter>();
-                foreach (var key in _deadLettered)
+                foreach ((int partition, long offset) in _deadLettered)
                 {
                     try
                     {
                         Record? record = null;
-                        var enumerator = log.ReadAsync(topic, key.Partition, key.Offset, 1).GetAsyncEnumerator();
+                        var enumerator = log.ReadAsync(topic, partition, offset, 1).GetAsyncEnumerator();
                         if (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
                         {
                             record = enumerator.Current;
                         }
+
                         enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
-                        if (record is not null && record.Offset == key.Offset)
+
+                        if (record is not null && record.Offset == offset)
                         {
-                            _attempts.TryGetValue(key, out int attempts);
-                            _lastReason.TryGetValue(key, out string? reason);
-                            result.Add(new DeadLetter(key.Partition, key.Offset, record, attempts, reason));
+                            _attempts.TryGetValue((partition, offset), out int attempts);
+                            _lastReason.TryGetValue((partition, offset), out string? reason);
+                            result.Add(new DeadLetter(partition, offset, record, attempts, reason));
                         }
                     }
                     catch
                     {
-                        // ignore
+                        // Un registro ya retenido fuera del log no se puede listar.
                     }
                 }
+
                 return result;
             }
         }
 
-        public void Apply(QueueEvent replayed)
+        /// <summary>
+        /// Avanza el cursor contiguo mientras los offsets siguientes estén resueltos. Devuelve el cursor nuevo.
+        /// Debe llamarse con el lock tomado.
+        /// </summary>
+        private long AdvancePrefix(int partition)
         {
-            lock (_gate)
+            long prefix = _prefix.GetValueOrDefault(partition, -1);
+            while (_done.Remove((partition, prefix + 1)))
             {
-                var key = (replayed.Partition, replayed.TargetOffset);
-                switch (replayed.Type)
-                {
-                    case RecordType.Receive:
-                        // UntilMs es el fin de la visibilidad: hay que reconstruirlo también,
-                        // o un mensaje en proceso volvería a entregarse de inmediato.
-                        _inFlight.Add(key);
-                        _visibleUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.UntilMs);
-                        _attempts.TryGetValue(key, out int attemptReceive);
-                        _attempts[key] = attemptReceive + 1;
-                        break;
-                    case RecordType.Ack:
-                        _inFlight.Remove(key);
-                        _visibleUntil.Remove(key);
-                        _acknowledged.Add(key);
-                        break;
-                    case RecordType.Timeout:
-                        // Venció la visibilidad: el mensaje vuelve a estar disponible. Sin esto,
-                        // un Timeout del log se aceptaría y se ignoraría, dejando el mensaje
-                        // invisible para siempre. El número de intento se conserva.
-                        _inFlight.Remove(key);
-                        _visibleUntil.Remove(key);
-                        break;
-                    case RecordType.Nack:
-                        _inFlight.Remove(key);
-                        _visibleUntil.Remove(key);
-                        if (replayed.Reason is not null)
-                        {
-                            _lastReason[key] = replayed.Reason;
-                        }
-                        if (replayed.UntilMs > 0)
-                        {
-                            _scheduledUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.UntilMs);
-                        }
-                        else
-                        {
-                            _deadLettered.Add(key);
-                        }
-                        break;
-                    default:
-                        break;
-                }
+                prefix++;
             }
+
+            _prefix[partition] = prefix;
+            return prefix;
         }
     }
 }
