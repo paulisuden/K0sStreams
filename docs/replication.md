@@ -2,7 +2,7 @@
 
 What the replication layer of K0sStreams is for, what it owns, which contracts it talks through, and how we plan to build it in isolation before plugging it into the rest of the broker.
 
-Complements [ARQUITECTURA.md](ARQUITECTURA.md) (overall design) and [contexto.md](history/contexto.md) (state of the code). What was built in each iteration, and how it was checked, is in [replication-iterations.md](history/replication-iterations.md). How the code is organized is in [replication-code-guide.md](history/replication-code-guide.md). Failure scenarios and the guardrail for each are drawn in [replication-scenarios.md](history/replication-scenarios.md).
+Complements [ARQUITECTURA.md](ARQUITECTURA.md) (overall design) and [contexto.md](contexto.md) (state of the code). What was built in each iteration, and how it was checked, is in [replication-iterations.md](replication-iterations.md). How the code is organized is in [replication-code-guide.md](replication-code-guide.md). Failure scenarios and the guardrail for each are drawn in [replication-scenarios.md](replication-scenarios.md).
 
 > **In one paragraph.** K0sStreams runs as three identical brokers. One of them, the **leader**, accepts writes. The other two, the **followers**, keep copies. Replication turns "the leader wrote it to its disk" into "it is on the disk of at least 2 of the 3 brokers", and only then lets the producer get its `201 OK`. That single rule is what lets us lose any one broker without losing a confirmed message. Replication also decides how far clients may read (the **high watermark**), brings lagging followers back up to date, and rejects writes from a leader that has already been replaced (**fencing**).
 
@@ -21,7 +21,7 @@ The pitch is **"the log that is also a queue"**: every topic can be consumed in 
 
 Clients talk HTTP REST on port `9090`. Brokers talk gRPC to each other on port `9091`. Leader election is delegated to a Kubernetes Lease (etcd guarantees a single holder). Epochs and fencing on top of it are ours.
 
-**The decision that shapes everything:** the append-only log is the single source of truth. The queue's durable state is only the committed cursor (OffsetCommit records) and DLQ markers; deliveries in progress, visibility and retries live in memory and are redelivered after a failover (at-least-once). For replication this is good news: there is exactly **one** thing to replicate, the log, and messages, cursor commits and epoch changes all come along with it.
+**The decision that shapes everything:** the append-only log is the single source of truth. Even the queue's state (receive, ack, nack, timeout) is stored as records in that same log (event sourcing). For replication this is good news: there is exactly **one** thing to replicate, the log, and messages, queue state and epoch changes all come along with it.
 
 ### Who builds what
 
@@ -112,7 +112,7 @@ Replication is the only block that talks to other brokers. It sits **beside** th
 
 ### Contract rules that matter most to replication
 
-These come from the XML docs in `Contracts` and from [contexto.md](history/contexto.md):
+These come from the XML docs in `Contracts` and from [contexto.md](contexto.md):
 
 - `ReadAsync` does **not** stop at the HW. Replication needs the unconfirmed tail; the API is the one that cuts at the HW.
 - `AppendAsync` with an explicit offset must be exactly `EndOffset + 1`, otherwise it throws `ArgumentException`.
@@ -409,7 +409,7 @@ Ordered by how much damage they can do. Nothing here blocks phases 2 and 3, whic
 
 ### 10.1 🔴 Failover, as currently described, can lose confirmed messages (C, D, A)
 
-> **Status:** implemented in [iteration 3](history/replication-iterations.md) as described below, with two differences in the contract (see *Contract impact*). The plan change is [DEC-002](decisions.md), pending team approval.
+> **Status:** implemented in [iteration 3](replication-iterations.md) as described below, with two differences in the contract (see *Contract impact*). The plan change is [DEC-002](decisions.md), pending team approval.
 
 There are two separate problems.
 
@@ -424,7 +424,7 @@ broker-2              e1   e1         ← was slow and missed 42
 
 broker-0 dies, and broker-2 happens to grab the Lease. It becomes leader at epoch 2 with end offset 41 and writes a new record at 42. When it replicates that to broker-1, broker-1 sees a conflict at 42 and truncates its copy. The confirmed record is gone. (If broker-1's HW had already reached 42, `TruncateAsync` refuses instead and broker-1 is stuck. Either way, it's wrong.)
 
-**Problem 2: "the new leader discards what wasn't confirmed by quorum".** This is the rule in [README.md](../README.md) (line 53), [ARQUITECTURA.md](ARQUITECTURA.md) (Flow 4, step 4, and line 340: "A: truncate on epoch change") and [contexto.md](history/contexto.md) (line 119: `EpochChanged` tells A to truncate). Now say broker-1, which does have 42, wins the Lease. As section 5.1 shows, its HW is probably still 41, because it hadn't received the heartbeat carrying `leader_hw = 42` yet. Truncating to its own HW deletes 42, which a producer already got a `201` for.
+**Problem 2: "the new leader discards what wasn't confirmed by quorum".** This is the rule in [README.md](../README.md) (line 53), [ARQUITECTURA.md](ARQUITECTURA.md) (Flow 4, step 4, and line 340: "A: truncate on epoch change") and [contexto.md](contexto.md) (line 119: `EpochChanged` tells A to truncate). Now say broker-1, which does have 42, wins the Lease. As section 5.1 shows, its HW is probably still 41, because it hadn't received the heartbeat carrying `leader_hw = 42` yet. Truncating to its own HW deletes 42, which a producer already got a `201` for.
 
 This exact bug existed in Kafka and was fixed by [KIP-101](https://cwiki.apache.org/confluence/display/KAFKA/KIP-101+-+Alter+Replication+Protocol+to+use+Leader+Epoch+rather+than+High+Watermark+for+Truncation).
 

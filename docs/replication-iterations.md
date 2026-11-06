@@ -1,6 +1,6 @@
 # Replication: iteration log
 
-What changed in the replication block (C) in each iteration, how it was checked, and what the rest of the team needs to know. The design and the open issues live in [replication.md](../replication.md); this file is the history.
+What changed in the replication block (C) in each iteration, how it was checked, and what the rest of the team needs to know. The design and the open issues live in [replication.md](replication.md); this file is the history.
 
 Newest iteration first. Add a new section at the top for each one.
 
@@ -21,7 +21,7 @@ The 24 files were in one folder. They're now grouped by role, with one folder an
 - `Network/`: gRPC and the `IReplicationPeer` seam;
 - `Common/`: small shared pieces.
 
-The tests use the same folders. A new [README](../../src/K0sStreams.Replication/README.md) maps the folders, follows a write through them, and suggests where to start reading.
+The tests use the same folders. A new [README](../src/K0sStreams.Replication/README.md) maps the folders, follows a write through them, and suggests where to start reading.
 
 Each file's `using K0sStreams.Replication.…` lines now show which groups it depends on. Nothing depends on `Leader/` or `Failover/` except the registration.
 
@@ -34,7 +34,7 @@ Each file's `using K0sStreams.Replication.…` lines now show which groups it de
 | Date | 14 Oct 2026 |
 | Branch | `feature/replicacion`, on top of iteration 2 (`main` not merged in yet) |
 | Phase | 4 (22–28 Oct), done early at Franco's request. CLAUDE.md's rule 2 says not to get ahead of the plan; noted. |
-| Status | Done on the branch. The team has to approve [DEC-002](../decisions.md) (a Contracts change and a plan change) before merging. It runs for real once D's Lease calls it. |
+| Status | Done on the branch. The team has to approve [DEC-002](decisions.md) (a Contracts change and a plan change) before merging. It runs for real once D's Lease calls it. |
 
 ### In short
 
@@ -91,7 +91,7 @@ New helpers: `FailoverCluster` (three complete brokers, each linked to the other
 
 ### Decisions taken
 
-1. 👥 **[DEC-002](../decisions.md): promotion instead of truncating to the HW.** It adds `ILeaderPromotion` and `ListTopics` to Contracts, in their own PR.
+1. 👥 **[DEC-002](decisions.md): promotion instead of truncating to the HW.** It adds `ILeaderPromotion` and `ListTopics` to Contracts, in their own PR.
 2. **The new leader writes to itself as if it were its own follower.** Its catch-up and epoch mark go through its own `Append` handling, so the epoch fence and every follower check apply. The design review suggested a separate path without the fence; that path could overwrite records written by an even newer leader.
 3. **The epoch is announced with an empty `Append`**, which takes the topic's lock. A new `GetState` field wouldn't, so it could race with an append the old leader still has in flight.
 4. **The two-leaders guard compares the request with the epoch coordination says this broker leads,** not with the newest epoch it has seen. A replaced leader that already saw the new epoch must still follow the new leader. My first version broke every failover; the regression tests above now catch that.
@@ -140,7 +140,7 @@ The leader side exists:
 
 `IReplicator` is now `QuorumReplicator`. With no peers configured (a single broker), it still confirms at once, so single-broker use is unchanged.
 
-Also in this iteration, every topic is a single log on the replication side ([DEC-001](../decisions.md)), with partition 0 pinned in `SingleLog.cs`.
+Also in this iteration, every topic is a single log on the replication side ([DEC-001](decisions.md)), with partition 0 pinned in `SingleLog.cs`.
 
 ### What was built
 
@@ -200,7 +200,7 @@ Shared files: `Directory.Packages.props` gets one test package. `Contracts` is u
 ### Known limitations, on purpose
 
 - A topic starts replicating on its first write in a term. An idle topic isn't pushed to a restarted follower until it gets a new write.
-- There's no `EpochChange` record and no promotion step yet (phase 4, [replication.md §10.1](../replication.md#101--failover-as-currently-described-can-lose-confirmed-messages-c-d-a)).
+- There's no `EpochChange` record and no promotion step yet (phase 4, [replication.md §10.1](replication.md#101--failover-as-currently-described-can-lose-confirmed-messages-c-d-a)).
 - A divergent tail is stepped back about one offset per round trip.
 - With `InMemoryLog`, a restarted follower loses records it had acknowledged. That's inherent to the fake log, and the leader logs a warning.
 - A call that times out (`DeadlineExceeded`) still has no test of its own.
@@ -225,7 +225,7 @@ Shared files: `Directory.Packages.props` gets one test package. `Contracts` is u
 
 ### In short
 
-The replication protocol between brokers now works end to end: `Append`, `Fetch` and `GetState` from [replication.proto](../../src/K0sStreams.Contracts/Protos/replication.proto), including every check a follower must make before writing anything.
+The replication protocol between brokers now works end to end: `Append`, `Fetch` and `GetState` from [replication.proto](../src/K0sStreams.Contracts/Protos/replication.proto), including every check a follower must make before writing anything.
 
 The leader side doesn't exist yet. Nothing sends records to followers on its own, and nothing waits for 2 of 3 copies; that is phase 3. Until then `IReplicator` is still `InstantReplicator`, so a single broker behaves exactly as before.
 
@@ -235,7 +235,7 @@ Code in `src/K0sStreams.Replication/`:
 
 | File | What it does |
 | --- | --- |
-| `AppendHandler.cs` | Follower side of `Append` ([replication.md §5.3](../replication.md#53-what-a-follower-does-with-an-append)). It validates the topic, fences older epochs and adopts newer ones, checks the record before the batch, and checks CRC, offsets and epochs. It overwrites a divergent tail, skips records it already has, and updates the follower's high watermark. One append per partition at a time. |
+| `AppendHandler.cs` | Follower side of `Append` ([replication.md §5.3](replication.md#53-what-a-follower-does-with-an-append)). It validates the topic, fences older epochs and adopts newer ones, checks the record before the batch, and checks CRC, offsets and epochs. It overwrites a divergent tail, skips records it already has, and updates the follower's high watermark. One append per partition at a time. |
 | `ReplicationNode.cs` | This broker's side of the protocol: `Append` (through `AppendHandler`), `Fetch` (batched by record count and by bytes) and `GetState`. |
 | `ReplicationGrpcService.cs` | The gRPC endpoint on port 9091. It only forwards calls to `ReplicationNode`. |
 | `IReplicationPeer.cs` | "Another broker" as seen from this one. Implemented locally by `ReplicationNode` and remotely by `GrpcReplicationPeer`. |
@@ -243,7 +243,7 @@ Code in `src/K0sStreams.Replication/`:
 | `PeerDirectory.cs` | One long-lived gRPC channel per broker listed in `Replication:Peers`, except this one. |
 | `EpochTracker.cs` | This broker's epoch for fencing: the highest of D's epoch and the highest epoch accepted from a leader. |
 | `ReplicationOptions.cs` | The `Replication` configuration section (`Peers`, `RpcTimeout`, `MaxBatchRecords`, `MaxBatchBytes`), checked at startup. |
-| `PartitionAddress.cs` | Topic and partition validation shared by all three operations. Replaced by `SingleLog.cs` in [DEC-001](../decisions.md). |
+| `PartitionAddress.cs` | Topic and partition validation shared by all three operations. Replaced by `SingleLog.cs` in [DEC-001](decisions.md). |
 | `ServiceCollectionExtensions.cs` | `AddK0sReplication` registers all of the above plus gRPC; `MapK0sReplication` maps the service. |
 
 Tests in `tests/K0sStreams.Replication.Tests/`, 54 in total:
@@ -263,7 +263,7 @@ Helpers in `Support/`: `TestNode` (one broker's replication stack over `InMemory
 - `dotnet build`: clean, with warnings treated as errors.
 - `dotnet test`: the 54 new tests pass. The existing Contracts (32) and Broker (7) tests still pass, so the host still starts with gRPC registered.
 - **Phase 2 done criterion** ("replicate a record between two local processes"): two brokers ran as separate processes with `dotnet run`, on ports 9090/9091 and 9190/9191. A small gRPC client, not committed, appended a record to broker-0, fetched it back, and appended it to broker-1. broker-1 ended up with a byte-identical record and the same high watermark. Neither broker logged a warning.
-- **Not checked:** the grpcurl commands in [replication.md §8.3](../replication.md#83-trying-it-by-hand). grpcurl wasn't available on that machine. They perform the same steps as the client above.
+- **Not checked:** the grpcurl commands in [replication.md §8.3](replication.md#83-trying-it-by-hand). grpcurl wasn't available on that machine. They perform the same steps as the client above.
 
 ### Decisions taken
 
@@ -272,7 +272,7 @@ The ones marked 👥 need the team to agree.
 1. 👥 **Language.** Code, comments and test names in this block are in English, while the rest of the repo is in Spanish. The team should settle on one convention.
 2. **The generated protobuf messages are the request and response types.** There are no duplicate C# DTOs. A local node and a remote one share `IReplicationPeer` and fail the same way (`RpcException` with `InvalidArgument`), so phase 3 can put a simulated faulty network between in-process nodes.
 3. **Topic names are validated before touching the log**, with the same rules as topic creation. The name becomes a folder on disk, so a request for `../etc` never reaches `ILog`.
-4. 👥 **Followers don't check `ITopicCatalog`.** Topics only exist on the broker that created them, so checking would reject everything ([replication.md §10.3](../replication.md#103--topics-on-followers-a-b-c-open-topic-1-in-contextomd)).
+4. 👥 **Followers don't check `ITopicCatalog`.** Topics only exist on the broker that created them, so checking would reject everything ([replication.md §10.3](replication.md#103--topics-on-followers-a-b-c-open-topic-1-in-contextomd)).
 5. **`Fetch` doesn't lock the partition.** A long catch-up stream must not block appends. Whoever receives the stream verifies continuity, which `Append` already does with its previous-record check.
 6. **A conflict with a confirmed record is never hidden.** `ILog` refuses to truncate below the high watermark; the handler logs it as critical and the call fails. If it ever happens, the protocol has a bug.
 7. **gRPC isn't restricted to port 9091 in code.** Port 9090 only speaks HTTP/1.1 and gRPC needs HTTP/2, so in practice gRPC is only reachable on 9091.
@@ -284,9 +284,9 @@ No shared files changed: `Contracts`, `Program.cs` and `Directory.Packages.props
 
 | Who | What |
 | --- | --- |
-| A, Storage | Followers write a batch with one `AppendAsync` per record. With the disk log that means one fsync per record, so we need ordered pipelined appends or an `AppendBatchAsync` ([§10.4](../replication.md#104--expectations-on-ilog-a)). `EndOffset`, `HighWatermark` and `ReadAsync` get called for partitions that may never have been written (for example by `GetState`); they should return -1 or nothing without creating files. `TruncateAsync` is only called for divergent tails, never below the high watermark. |
-| B, Queue and API | Nothing changes yet: `IReplicator` is still `InstantReplicator`. For phase 3, see [§10.5](../replication.md#105--expectations-on-b): stamp records with the current epoch, call `WaitForQuorumAsync` with a timeout, and map `NotLeaderException`. |
-| D, Platform | For phase 3: `StaticClusterState` needs a configurable fixed leader (for example `Broker:LeaderId`), docker compose has to set `Replication:Peers`, and port 9091 must be reachable between brokers over cleartext HTTP/2 ([§10.2](../replication.md#102--who-are-my-peers-c-d)). The failover proposal in [§10.1](../replication.md#101--failover-as-currently-described-can-lose-confirmed-messages-c-d-a) is for phase 4. |
+| A, Storage | Followers write a batch with one `AppendAsync` per record. With the disk log that means one fsync per record, so we need ordered pipelined appends or an `AppendBatchAsync` ([§10.4](replication.md#104--expectations-on-ilog-a)). `EndOffset`, `HighWatermark` and `ReadAsync` get called for partitions that may never have been written (for example by `GetState`); they should return -1 or nothing without creating files. `TruncateAsync` is only called for divergent tails, never below the high watermark. |
+| B, Queue and API | Nothing changes yet: `IReplicator` is still `InstantReplicator`. For phase 3, see [§10.5](replication.md#105--expectations-on-b): stamp records with the current epoch, call `WaitForQuorumAsync` with a timeout, and map `NotLeaderException`. |
+| D, Platform | For phase 3: `StaticClusterState` needs a configurable fixed leader (for example `Broker:LeaderId`), docker compose has to set `Replication:Peers`, and port 9091 must be reachable between brokers over cleartext HTTP/2 ([§10.2](replication.md#102--who-are-my-peers-c-d)). The failover proposal in [§10.1](replication.md#101--failover-as-currently-described-can-lose-confirmed-messages-c-d-a) is for phase 4. |
 
 ### Known limitations, on purpose
 

@@ -7,7 +7,7 @@ namespace K0sStreams.Replication.Tests.Failover;
 
 /// <summary>
 /// Failover end to end, on three complete brokers: a new leader gets ready without losing any confirmed record.
-/// docs/replication.md §10.1 and docs/history/replication-scenarios.md §18.
+/// docs/replication.md §10.1 and docs/replication-scenarios.md §18.
 /// </summary>
 public class LeaderPromotionTests
 {

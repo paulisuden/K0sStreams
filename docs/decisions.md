@@ -1,16 +1,6 @@
-# Registro de decisiones (ADR)
+# Decision log
 
-Decisiones que cambian el alcance, los contratos o el diseño de K0sStreams. Cada
-entrada registra el contexto, la decisión y las consecuencias en cada bloque. Las
-nuevas entradas van al final, con el número siguiente.
-
-**Estados:** Propuesta · Aceptada · Reemplazada · Histórica.
-
-| ID | Decisión | Estado | Fecha |
-| --- | --- | --- | --- |
-| [DEC-001](#dec-001--one-partition-per-topic-remove-partitions) | Un log por tópico; eliminar particiones | Aceptada en el alcance original; implementación parcial (el contrato conserva `partitions`) | 7 Oct 2026 |
-| [DEC-002](#dec-002--promote-a-new-leader-instead-of-truncating-to-the-high-watermark) | Promover un líder nuevo en vez de truncar al high watermark | Aceptada e implementada | 14 Oct 2026 |
-| [DEC-003](#dec-003--store-the-topic-catalog-in-the-log) | Catálogo de tópicos en el log | Aceptada e implementada | 22 Oct 2026 |
+Decisions that change the scope, the contracts or the design of K0sStreams. Each entry says why it was taken, what it changes in each block, and what was left for later. Add new entries at the end, with the next number.
 
 ---
 
@@ -116,10 +106,6 @@ Worth mentioning in the defense as the way the design would scale.
 1. Agree on this with the team and merge one PR to `Contracts` with all the contract changes above.
 2. Each block adapts in its own branch. For replication it's a small change, done right after the Contracts PR.
 3. Update the docs listed above.
-
-### Update
-
-The implementation kept `Partitions` in the contract but uses **one log per topic** (partition 0). Per-partition leaders were not implemented, so the caveat above still holds: partitions add complexity but no write scaling. The delivered semantics are one writer, high availability, and a queue with at-least-once delivery.
 
 ---
 
