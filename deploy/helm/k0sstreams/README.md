@@ -133,6 +133,6 @@ package public once in GitHub → Packages.
 ## Observability
 
 The chart does not include Jaeger, Prometheus, or Grafana. The stack (Prometheus,
-Grafana dashboards, Jaeger) lives in the `cluster_k0s` step
-`07_skywatch/observability`. Point `opentelemetry.otlpEndpoint` at Jaeger's OTLP gRPC
-port (4317), e.g. `http://jaeger.observability.svc.cluster.local:4317`.
+Grafana dashboards, Jaeger) lives in the `cluster_k0s` step `07_observability`. Point
+`opentelemetry.otlpEndpoint` at Jaeger's OTLP gRPC port (4317), e.g.
+`http://jaeger.observability.svc.cluster.local:4317`.
