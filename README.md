@@ -44,7 +44,7 @@ Las decisiones principales:
 - **Broker ↔ broker:** gRPC, puerto `9091`.
 - **Elección de líder:** Lease de Kubernetes (etcd garantiza que haya uno solo), más épocas y *fencing* propios para rechazar a un líder viejo.
 - **Disco:** log append-only con *group commit* (un `fsync` por lote, no por mensaje).
-- **Fuente de verdad única:** el log. Incluso el estado de la cola (receive, ack, nack, timeout) se guarda como eventos en el log, así un nuevo líder puede reconstruirlo.
+- **Fuente de verdad:** el log de mensajes. Del motor de cola solo son durables el cursor confirmado de cada cola y las marcas de DLQ; la entrega en proceso, la visibilidad y los reintentos viven en memoria y se reentregan si cambia el líder (at-least-once).
 
 ### ¿Qué pasa si se cae el líder?
 
@@ -54,6 +54,15 @@ Las decisiones principales:
 4. Si el líder viejo vuelve, sus mensajes llevan una época vieja y se rechazan. Se reincorpora como seguidor.
 
 El detalle completo (flujos, formato en disco, contratos) está en [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md).
+
+## Alcance y límites
+
+- **Un solo líder para todos los tópicos.** La replicación da alta disponibilidad (sobrevive la caída de un broker), no escala de escritura. Todos los productores escriben en el mismo líder.
+- **Un log por tópico.** `partitions` sigue en el contrato para poder particionar en el futuro, pero la implementación usa la partición 0. No hay líderes por partición.
+- **Cola sin grupos de consumidores.** Todos los consumidores de una cola compiten por el próximo mensaje; no hay asignación de particiones ni generaciones.
+- **At-least-once, no exactly-once.** Si el líder cae antes del volcado del cursor, se reentregan mensajes ya confirmados. Los consumidores deben tolerar duplicados.
+- **Retención por tiempo o tamaño.** Un mensaje no consumido puede expirar según esa política. No hay compactación.
+- **Sin transacciones, idempotencia de productor ni cooperación de rebalance.**
 
 ## Resultados
 
@@ -77,8 +86,8 @@ Una vez levantado, la documentación interactiva queda en `http://<host>:9090/sw
 | `POST` | `/v1/topics/{t}/messages` | Publicar un mensaje |
 | `GET` | `/v1/topics/{t}/partitions/{p}/messages?from=&max=` | Leer como historial |
 | `POST` | `/v1/topics/{t}/queues/{q}/receive` | Tomar el próximo trabajo de la cola |
-| `POST` | `/v1/topics/{t}/queues/{q}/ack/{offset}` | Confirmar que se procesó |
-| `POST` | `/v1/topics/{t}/queues/{q}/nack/{offset}` | Devolverlo para reintentar |
+| `POST` | `/v1/topics/{t}/queues/{q}/ack/{p}/{o}` | Confirmar que se procesó |
+| `POST` | `/v1/topics/{t}/queues/{q}/nack/{p}/{o}` | Devolverlo para reintentar |
 | `GET` | `/v1/topics/{t}/queues/{q}/dlq` | Ver mensajes que agotaron los reintentos |
 | `GET` | `/health`, `/ready` | Sondas de Kubernetes |
 
@@ -100,7 +109,7 @@ curl 'http://localhost:9090/v1/topics/pedidos/partitions/0/messages?from=0&max=1
 
 # Consumir como cola
 curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/receive
-curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/ack/0
+curl -X POST http://localhost:9090/v1/topics/pedidos/queues/facturacion/ack/0/0
 ```
 
 > Los cuerpos de ejemplo siguen el diseño acordado; pueden ajustarse cuando se implemente la API.

@@ -107,6 +107,10 @@ Worth mentioning in the defense as the way the design would scale.
 2. Each block adapts in its own branch. For replication it's a small change, done right after the Contracts PR.
 3. Update the docs listed above.
 
+### Update
+
+The implementation kept `Partitions` in the contract but uses **one log per topic** (partition 0). Per-partition leaders were not implemented, so the caveat above still holds: partitions add complexity but no write scaling. The delivered semantics are one writer, high availability, and a queue with at-least-once delivery.
+
 ---
 
 ## DEC-002 · Promote a new leader instead of truncating to the high watermark

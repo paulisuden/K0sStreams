@@ -21,7 +21,7 @@ The pitch is **"the log that is also a queue"**: every topic can be consumed in 
 
 Clients talk HTTP REST on port `9090`. Brokers talk gRPC to each other on port `9091`. Leader election is delegated to a Kubernetes Lease (etcd guarantees a single holder). Epochs and fencing on top of it are ours.
 
-**The decision that shapes everything:** the append-only log is the single source of truth. Even the queue's state (receive, ack, nack, timeout) is stored as records in that same log (event sourcing). For replication this is good news: there is exactly **one** thing to replicate, the log, and messages, queue state and epoch changes all come along with it.
+**The decision that shapes everything:** the append-only log is the single source of truth. The queue's durable state is only the committed cursor (OffsetCommit records) and DLQ markers; deliveries in progress, visibility and retries live in memory and are redelivered after a failover (at-least-once). For replication this is good news: there is exactly **one** thing to replicate, the log, and messages, cursor commits and epoch changes all come along with it.
 
 ### Who builds what
 

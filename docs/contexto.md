@@ -1,3 +1,5 @@
+> **Documento histórico.** Describe el plan de una etapa anterior. El estado actual está en [README](../README.md) y [ARQUITECTURA.md](ARQUITECTURA.md): un log por tópico, entrega en memoria con cursor durable y at-least-once.
+
 # Contexto para implementar K0sStreams
 
 Qué hay hoy en el repositorio, dónde trabaja cada integrante y qué tener en cuenta al programar cada bloque. Complementa a [ARQUITECTURA.md](ARQUITECTURA.md), que explica el diseño; este documento explica el código.
