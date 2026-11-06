@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "k0sstreams.fullname" . }}
+  labels:
+    {{- include "k0sstreams.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "k0sstreams.headless.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "k0sstreams.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "k0sstreams.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "k0sstreams.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: Broker__NodeId
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: Broker__DataDir
+              value: {{ .Values.broker.dataDir | quote }}
+            - name: Retention__MaxAge
+              value: {{ .Values.retention.maxAge | quote }}
+            - name: Retention__MaxBytes
+              value: {{ .Values.retention.maxBytes | quote }}
+            - name: Retention__CheckInterval
+              value: {{ .Values.retention.checkInterval | quote }}
+            - name: Replication__RpcTimeout
+              value: {{ .Values.replication.rpcTimeout | quote }}
+            - name: Replication__HeartbeatInterval
+              value: {{ .Values.replication.heartbeatInterval | quote }}
+            - name: Replication__RetryBackoff
+              value: {{ .Values.replication.retryBackoff | quote }}
+            - name: Replication__MaxRetryBackoff
+              value: {{ .Values.replication.maxRetryBackoff | quote }}
+            - name: Replication__MaxBatchRecords
+              value: {{ .Values.replication.maxBatchRecords | quote }}
+            - name: Replication__MaxBatchBytes
+              value: {{ .Values.replication.maxBatchBytes | quote }}
+            {{- $fullname := include "k0sstreams.fullname" . }}
+            {{- $headless := include "k0sstreams.headless.fullname" . }}
+            {{- $ns := .Release.Namespace }}
+            {{- range $i := until (int .Values.replicaCount) }}
+            - name: Replication__Peers__{{ $fullname }}-{{ $i }}
+              value: {{ printf "http://%s-%d.%s.%s.svc.cluster.local:9091" $fullname $i $headless $ns | quote }}
+            {{- end }}
+            - name: Coordination__LeaseName
+              value: {{ .Values.coordination.leaseName | quote }}
+            - name: Coordination__LeaseDuration
+              value: {{ .Values.coordination.leaseDuration | quote }}
+            - name: Coordination__RenewDeadline
+              value: {{ .Values.coordination.renewDeadline | quote }}
+            - name: Coordination__RetryPeriod
+              value: {{ .Values.coordination.retryPeriod | quote }}
+            - name: Coordination__LeaderAddressFormat
+              value: {{ tpl .Values.coordination.leaderAddressFormat . | quote }}
+            - name: OpenTelemetry__OtlpEndpoint
+              value: {{ .Values.opentelemetry.otlpEndpoint | quote }}
+            - name: K0sStreams__InvariantGlobalization
+              value: "true"
+          ports:
+            - name: http
+              containerPort: {{ .Values.broker.httpPort }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.broker.grpcPort }}
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.broker.dataDir }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.persistence.enabled }}
+  # Ojo: volumeClaimTemplates es inmutable en un StatefulSet. Solo labels estables
+  # (sin helm.sh/chart ni app.kubernetes.io/version) para que un bump del chart no
+  # intente cambiar el spec y falle con "updates to statefulset spec ... forbidden".
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data
+        labels:
+          {{- include "k0sstreams.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

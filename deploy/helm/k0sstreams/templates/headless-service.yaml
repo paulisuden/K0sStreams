@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "k0sstreams.headless.fullname" . }}
+  labels:
+    {{- include "k0sstreams.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.headless.type }}
+  clusterIP: {{ .Values.service.headless.clusterIP }}
+  publishNotReadyAddresses: {{ .Values.service.headless.publishNotReadyAddresses }}
+  selector:
+    {{- include "k0sstreams.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.broker.httpPort }}
+      targetPort: http
+    - name: grpc
+      port: {{ .Values.broker.grpcPort }}
+      targetPort: grpc

@@ -1,0 +1,147 @@
+# Default values for k0sstreams.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 3
+
+image:
+  # GHCR: el workflow de CI publica sha-<short> y latest en cada push a main,
+  # y después reescribe "tag" con el sha de esa imagen.
+  repository: ghcr.io/paulisuden/k0sstreams-broker
+  pullPolicy: IfNotPresent
+  tag: "sha-3500481"
+
+# Si el paquete de GHCR queda privado, crear el secret en el namespace y listarlo acá.
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Automatically mount a default service account token for the pod
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+broker:
+  # Broker node ID. If not set, uses the pod name via downward API.
+  nodeId: ""
+  # Data directory inside the container
+  dataDir: "/data"
+  # Leader address format for followers to redirect clients
+  leaderAddressFormat: "http://{0}.{{ include \"k0sstreams.headless.fullname\" . }}.{{ .Release.Namespace }}.svc.cluster.local:9090"
+  # Port for HTTP API
+  httpPort: 9090
+  # Port for gRPC replication
+  grpcPort: 9091
+
+# OpenTelemetry configuration
+opentelemetry:
+  # OTLP endpoint for trace export. Empty = traces generated but not exported.
+  otlpEndpoint: ""
+  # Service name for telemetry
+  serviceName: "k0sstreams-broker"
+
+# Retention configuration
+retention:
+  maxAge: "24:00:00"
+  maxBytes: "1073741824"  # 1 GiB
+  checkInterval: "00:05:00"
+
+# Replication configuration
+replication:
+  rpcTimeout: "00:00:02"
+  heartbeatInterval: "00:00:00.500"
+  retryBackoff: "00:00:00.100"
+  maxRetryBackoff: "00:00:02"
+  maxBatchRecords: 500
+  maxBatchBytes: "1048576"
+
+# Coordination configuration (Kubernetes Lease leader election)
+coordination:
+  leaseName: "k0sstreams-leader"
+  leaseDuration: "00:00:10"
+  renewDeadline: "00:00:07"
+  retryPeriod: "00:00:02"
+  leaderAddressFormat: "http://{0}.{{ include \"k0sstreams.headless.fullname\" . }}.{{ .Release.Namespace }}.svc.cluster.local:9090"
+
+service:
+  # Headless service for stable DNS per pod
+  headless:
+    type: ClusterIP
+    clusterIP: "None"
+    publishNotReadyAddresses: true
+  # LoadBalancer for client traffic
+  loadBalancer:
+    type: LoadBalancer
+    port: 9090
+    targetPort: 9090
+
+# Kubernetes Lease RBAC
+rbac:
+  create: true
+
+# Persistent volume claim for each broker
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+
+podSecurityContext:
+  fsGroup: 1654
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #     - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: k0sstreams-broker
+
+resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #   cpu: 500m
+  #   memory: 512Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 256Mi
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  periodSeconds: 5
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+
+tolerations: []

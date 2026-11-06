@@ -1,0 +1,48 @@
+K0sStreams is installed as {{ include "k0sstreams.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+1. Check the brokers:
+
+   kubectl rollout status statefulset/{{ include "k0sstreams.fullname" . }} -n {{ .Release.Namespace }}
+
+2. Create a topic (the chart installs the Topic CRD):
+
+kubectl apply -n {{ .Release.Namespace }} -f - <<'EOF'
+apiVersion: k0sstreams.io/v1
+kind: Topic
+metadata:
+  name: orders
+spec:
+  partitions: 3
+EOF
+
+   kubectl get topics -n {{ .Release.Namespace }}
+
+   The leader creates it within ~5 s. If it does not appear, check its log:
+
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "k0sstreams.name" . }} --tail=50
+
+3. Endpoints:
+
+   In-cluster: http://{{ include "k0sstreams.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.broker.httpPort }}
+   External:   kubectl get service {{ include "k0sstreams.fullname" . }}-lb -n {{ .Release.Namespace }}
+
+   A follower redirects writes (307) to the leader's pod DNS name, so external clients need a
+   LoadBalancer implementation and the pod DNS name must be resolvable from the client network.
+   Reads work against any broker.
+
+4. List, publish and read:
+
+   curl 'http://{{ include "k0sstreams.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.broker.httpPort }}/v1/topics'
+
+   curl -X POST 'http://{{ include "k0sstreams.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.broker.httpPort }}/v1/topics/orders/messages' \
+     -H 'Content-Type: application/json' -d '{"value":"hello"}'
+
+   curl 'http://{{ include "k0sstreams.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.broker.httpPort }}/v1/topics/orders/partitions/0/messages?from=0&max=10'
+
+Prerequisites:
+
+- A default StorageClass for the PVCs; otherwise the pods stay Pending.
+- A LoadBalancer implementation (for example MetalLB) if you need the external service.
+- Helm does not upgrade CRDs. After changing the schema, apply it manually:
+
+  kubectl apply -f deploy/helm/k0sstreams/crds/topic-crd.yaml
