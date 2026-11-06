@@ -1,8 +1,8 @@
 # Documentación de K0sStreams
 
-Un solo punto de entrada. Los documentos se separan por **intención**, no por
-fecha: qué quisimos construir, cómo está diseñado hoy, qué decidimos y qué quedó
-en el camino.
+Un solo punto de entrada. Los documentos se separan por **intención**: qué es el
+proyecto, cómo está diseñado, qué decisiones lo sostienen y qué etapas quedan como
+archivo.
 
 ## Orden de lectura
 

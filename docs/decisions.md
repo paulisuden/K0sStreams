@@ -1,8 +1,8 @@
 # Registro de decisiones (ADR)
 
 Decisiones que cambian el alcance, los contratos o el diseño de K0sStreams. Cada
-entrada dice por qué se tomó, qué cambia en cada bloque y qué quedó para después.
-Las nuevas entradas van al final, con el número siguiente.
+entrada registra el contexto, la decisión y las consecuencias en cada bloque. Las
+nuevas entradas van al final, con el número siguiente.
 
 **Estados:** Propuesta · Aceptada · Reemplazada · Histórica.
 
