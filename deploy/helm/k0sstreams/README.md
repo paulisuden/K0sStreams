@@ -53,8 +53,8 @@ redirects; that name resolves only inside the cluster.
 | Parameter | Description | Default |
 |---|---|---|
 | `replicaCount` | Number of broker pods | `3` |
-| `image.repository` | Broker image repository | `ghcr.io/paulisuden/k0sstreams-broker` |
-| `image.tag` | Broker image tag | `sha-<commit>` (updated by CI) |
+| `image.repository` | Broker image repository | `adrzanbar/k0sstreams-broker` |
+| `image.tag` | Broker image tag | `original-scope-compat` |
 | `broker.dataDir` | Data directory inside container | `/data` |
 | `broker.httpPort` | HTTP API port | `9090` |
 | `broker.grpcPort` | gRPC replication port | `9091` |
@@ -117,18 +117,20 @@ When empty, traces are generated internally but not exported — useful for loca
 
 ## CI/CD
 
-Every push to `main` runs the tests, publishes
-`ghcr.io/paulisuden/k0sstreams-broker:sha-<short>` (and `:latest`), and then commits the
-new tag back into `values.yaml` and `Chart.yaml`. Pull and upgrade to take it:
+Every push to `main` runs the tests and publishes
+`ghcr.io/paulisuden/k0sstreams-broker:sha-<short>` (and `:latest`). This chart is pinned
+to the image used for the demo (`adrzanbar/k0sstreams-broker:original-scope-compat`) so
+the install script does not fall back to an older image. To deploy a CI-built image,
+override it explicitly:
 
 ```bash
-git pull
-helm upgrade k0sstreams ./deploy/helm/k0sstreams -n k0sstreams
+helm upgrade k0sstreams ./deploy/helm/k0sstreams -n k0sstreams \
+  --set image.repository=ghcr.io/paulisuden/k0sstreams-broker \
+  --set image.tag=sha-<short>
 ```
 
-The tag is immutable, so the pod template changes and the StatefulSet rolls. If the GHCR
-package is private, create a pull secret and set `imagePullSecrets`; otherwise make the
-package public once in GitHub → Packages.
+The tag is immutable, so the pod template changes and the StatefulSet rolls. If the image
+package is private, create a pull secret and set `imagePullSecrets`.
 
 ## Observability
 
