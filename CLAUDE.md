@@ -6,7 +6,7 @@ Somos 4 personas trabajando en paralelo sobre el mismo repo. Estas reglas existe
 
 Leer antes de tocar código:
 - [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md): el diseño y el plan por fases.
-- [docs/contexto.md](docs/contexto.md): el estado del código y las reglas de cada contrato que no se ven en las firmas.
+- [docs/history/contexto.md](docs/history/contexto.md): el estado del código y las reglas de cada contrato que no se ven en las firmas.
 
 ## Para agentes (Claude Code u otros): avisos obligatorios al usuario
 
@@ -48,7 +48,7 @@ Archivos **compartidos**: no se tocan sin avisar antes en el grupo, y van en un 
 | `src/K0sStreams.Broker/Program.cs` | Está terminado. Cada bloque registra lo suyo en su `ServiceCollectionExtensions.cs`. |
 | `src/K0sStreams.Broker/appsettings.json` | Puertos y protocolos de Kestrel: si cambian, se rompen las sondas y la replicación. |
 | `Directory.Packages.props`, `Directory.Build.props`, `.editorconfig`, `global.json`, `K0sStreams.slnx` | Afectan la compilación de todos. |
-| `README.md`, `docs/ARQUITECTURA.md`, `docs/contexto.md` | Documentan acuerdos del equipo. Cada uno documenta su bloque en su sección o en un archivo propio en `docs/`. |
+| `README.md`, `docs/ARQUITECTURA.md`, `docs/history/contexto.md` | Documentan acuerdos del equipo. Cada uno documenta su bloque en su sección o en un archivo propio en `docs/`. |
 
 **Si una tarea necesita cambiar algo de otro bloque o un archivo compartido: frenar, avisarle al usuario y proponer el cambio exacto para que lo haga el dueño.** No se "arregla de paso", ni siquiera un typo o un test ajeno que falla.
 

@@ -18,6 +18,38 @@ Consecuencia clave para el equipo: el log es la única fuente de verdad. La API,
 
 > **Estado actual del alcance:** hay un log por tópico. `partitions` sigue en el contrato para poder particionar en el futuro, pero la implementación usa la partición 0. No hay líderes por partición ni grupos de consumidores: el líder del cluster escribe todos los tópicos, y la replicación da alta disponibilidad, no escala de escritura.
 
+## Estado de implementación
+
+### Implementado
+
+- Log append-only por tópico: segmentos, índice, CRC32, group commit, recuperación.
+- Replicación 2 de 3, high watermark, puesta al día de seguidores.
+- Lease de Kubernetes, épocas, fencing y promoción con recuperación de quórum.
+- Failover: sobrevive la caída de un broker sin perder mensajes confirmados.
+- Cola de trabajo: `receive`, `ack`, `nack`, visibility timeout, reintentos con backoff, programados y DLQ.
+- Cursor durable por cola y marcas de DLQ; entrega en proceso en memoria.
+- Retención por tiempo y tamaño.
+- `/health`, `/ready`, tópicos por CRD, API HTTP y gRPC entre brokers.
+
+### No implementado
+
+| Capacidad | Por qué no está |
+| --- | --- |
+| Líder por partición | Requiere asignación entre brokers vivos, épocas por partición y ruteo por partición. Es el trabajo futuro de escala. |
+| Grupos de consumidores | La cola actual no asigna particiones; los consumidores compiten por el próximo mensaje. |
+| API de offsets (commit/fetch) | El cursor es interno; no hay contrato HTTP para inspeccionarlo. |
+| Compactación | Retención por tiempo/tamaño solamente. |
+| Transacciones / exactly-once | Fuera de alcance; la garantía es at-least-once. |
+| Rebalance cooperativo, seguridad, cuotas | Fuera de alcance. |
+
+### Límites conocidos
+
+- **Un solo escritor** para todos los tópicos: la replicación da HA, no throughput.
+- **Un log por tópico**: las particiones no distribuyen escritura ni lectura entre brokers.
+- **At-least-once**: un failover puede reentregar mensajes ya confirmados entre el ack y el volcado del cursor (~1 s).
+- **Auto-commit perezoso**: si un consumidor confirma y deja de hacer `receive`, el último cursor puede no quedar persistido.
+- **Rendimiento atado al disco:** en las volúmenes Cinder del cluster, cada escritura confirmada por quórum paga un fsync; el benchmark en disco local da ~500 publicaciones/s, el cluster está limitado por el almacenamiento.
+
 ## Componentes
 
 Los tres brokers ejecutan el mismo binario y la misma imagen Docker. Solo cambia el rol: el que tiene el Lease es líder del cluster (todos los tópicos), los otros son seguidores. Cada broker tiene cinco capas internas, de arriba hacia abajo:

@@ -2,7 +2,7 @@
 
 How replication behaves when everything works (part 1), what can go wrong, and what the code does about each case (part 2). Every scenario has a diagram, the guardrail that handles it, where that guardrail lives in the code, and the test that proves it.
 
-Reflects the code as of [iteration 3](replication-iterations.md) (phase 4): the follower side, the gRPC layer, the leader side and failover. What's still missing is drawn in grey. For the reasoning behind the protocol see [replication.md](replication.md); for the classes, see the [code guide](replication-code-guide.md).
+Reflects the code as of [iteration 3](replication-iterations.md) (phase 4): the follower side, the gRPC layer, the leader side and failover. What's still missing is drawn in grey. For the reasoning behind the protocol see [replication.md](../replication.md); for the classes, see the [code guide](replication-code-guide.md).
 
 **How to read the diagrams**
 
@@ -69,7 +69,7 @@ flowchart TD
     classDef notyet fill:#f1f3f5,stroke:#868e96,color:#111,stroke-dasharray:4 3
 ```
 
-Replication's whole part of the path is built and tested, leader and follower. What's missing is B's API that starts it, and A's disk log in place of the in-memory fake. [replication.md §5.1](replication.md#51-the-happy-path) shows the same path as a sequence, with the timing between brokers.
+Replication's whole part of the path is built and tested, leader and follower. What's missing is B's API that starts it, and A's disk log in place of the in-memory fake. [replication.md §5.1](../replication.md#51-the-happy-path) shows the same path as a sequence, with the timing between brokers.
 
 ### N2. A normal append, step by step through the code
 
@@ -207,7 +207,7 @@ Two design rules hold the order together:
 - **Nothing is written until every check has passed.** Gates G1 to G5 only read. A rejected request leaves the log exactly as it was.
 - **The cheapest and most important checks come first.** An invalid address never even gets a lock. A request from a replaced leader is turned away before any record is looked at.
 
-All of it lives in [AppendHandler.cs](../src/K0sStreams.Replication/Follower/AppendHandler.cs).
+All of it lives in [AppendHandler.cs](../../src/K0sStreams.Replication/Follower/AppendHandler.cs).
 
 ---
 
@@ -239,7 +239,7 @@ flowchart LR
 
 **Guardrail.** Every operation validates the address with the same rules as topic creation (`TopicConfig.IsValidName`) before any other step. Because the check runs before taking the topic's lock, junk names don't even create a lock entry in memory.
 
-**Where.** [SingleLog.cs](../src/K0sStreams.Replication/Common/SingleLog.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
+**Where.** [SingleLog.cs](../../src/K0sStreams.Replication/Common/SingleLog.cs), called from `AppendHandler.HandleAsync` and `ReplicationNode.EnsureValid`.
 
 ---
 
@@ -299,7 +299,7 @@ sequenceDiagram
 
 **Guardrail.** This broker's epoch is the higher of two sources: what coordination says, and the highest epoch accepted from a leader. A newer epoch is adopted *as soon as it's seen*, before the log checks. That way the old leader is fenced even if the first append from the new leader fails (for example on a log mismatch).
 
-**Where.** [EpochTracker.cs](../src/K0sStreams.Replication/Common/EpochTracker.cs). `Observe` is safe under concurrent calls and only ever moves the epoch up.
+**Where.** [EpochTracker.cs](../../src/K0sStreams.Replication/Common/EpochTracker.cs). `Observe` is safe under concurrent calls and only ever moves the epoch up.
 
 ---
 
@@ -376,7 +376,7 @@ flowchart TD
 
 **One caveat.** This all-or-nothing rule covers *validation*. The writes themselves happen one by one, so if the follower's own disk failed halfway, part of the batch would be written. That's still safe: the log stays a valid prefix, and the leader's retry skips what's already there (§9).
 
-**Where.** `AppendHandler.TryDecode`, using [RecordCodec](../src/K0sStreams.Contracts/RecordCodec.cs).
+**Where.** `AppendHandler.TryDecode`, using [RecordCodec](../../src/K0sStreams.Contracts/RecordCodec.cs).
 
 ---
 
@@ -638,7 +638,7 @@ flowchart TD
 
 **Coverage.** The unreachable case is tested over real gRPC, and the leader's backoff and recovery are tested in `QuorumReplicatorTests` (`A_write_is_confirmed_with_one_follower_down`, `Pending_writes_confirm_when_a_follower_returns`). A call that times out (`DeadlineExceeded`) still has no test of its own.
 
-**Where.** [GrpcReplicationPeer.cs](../src/K0sStreams.Replication/Network/GrpcReplicationPeer.cs).
+**Where.** [GrpcReplicationPeer.cs](../../src/K0sStreams.Replication/Network/GrpcReplicationPeer.cs).
 
 ---
 
@@ -665,7 +665,7 @@ flowchart TD
 - **Fail at startup, not later.** A bad value stops the broker immediately with a clear message, instead of breaking replication silently in production.
 - **Never a peer of itself.** All three brokers can share the same peer list; each one skips its own entry. Replicating to yourself would make a single broker count as two copies, a fake quorum.
 
-**Where.** `ReplicationOptions.IsValid`, `AddK0sReplication` (`ValidateOnStart`), [PeerDirectory.cs](../src/K0sStreams.Replication/Network/PeerDirectory.cs).
+**Where.** `ReplicationOptions.IsValid`, `AddK0sReplication` (`ValidateOnStart`), [PeerDirectory.cs](../../src/K0sStreams.Replication/Network/PeerDirectory.cs).
 
 ---
 
@@ -675,14 +675,14 @@ These guardrails come in later phases or need a team decision. They're listed so
 
 | Scenario | What happens today | Planned guardrail | When |
 | --- | --- | --- | --- |
-| **The new leader is missing confirmed records** (the Lease went to a lagging broker) | ✅ Covered: the promotion copies them from the most complete log of a majority (§19) | — | Done (iteration 3); D must call it ([DEC-002](decisions.md)) |
+| **The new leader is missing confirmed records** (the Lease went to a lagging broker) | ✅ Covered: the promotion copies them from the most complete log of a majority (§19) | — | Done (iteration 3); D must call it ([DEC-002](../decisions.md)) |
 | **Two brokers both think they lead the same epoch** | Partly covered: a leader refuses another leader of its own epoch (§19). A follower would still accept both | D gives each epoch to one broker (fixed leader now, the Lease later) | Relies on D |
 | **The old leader reaches the last follower before the new leader does** | ✅ Covered: the survey fences a majority under each topic's lock. A write the old leader got confirmed before that is on a broker the survey reaches, so it's kept | — | Done (iteration 3) |
 | **The old leader keeps going after `STALE_EPOCH`** | ✅ Covered: it adopts the newer epoch, fails pending writes with `NotLeaderException` and stops its loops | — | Done (iteration 2) |
 | **Both followers are down** | `QuorumReplicator` waits until the caller cancels; the HW doesn't move | B passes a timeout to `WaitForQuorumAsync` and answers 503 | When B's API lands |
 | **A broker restarts and forgets the epoch it adopted** | It falls back to D's epoch until a leader contacts it again | Persist the epoch, or read it from the last `EpochChange` record in the log | Later |
 | **Two brokers restart, then a failover, before a topic gets a new write** | `KnownTopics` lives in memory, so the new leader may not know that topic | List topics from `ILog` (A, next Contracts batch) | Before phase 5's chaos tests |
-| **A topic the follower has never heard of** | Accepted for any valid name | Replicated topic metadata ([§10.3](replication.md#103--topics-on-followers-a-b-c-open-topic-1-in-contextomd)) | Team decision |
+| **A topic the follower has never heard of** | Accepted for any valid name | Replicated topic metadata ([§10.3](../replication.md#103--topics-on-followers-a-b-c-open-topic-1-in-contextomd)) | Team decision |
 | **A malicious broker sends an absurd epoch** | Adopted, which fences the real leader | Out of scope: the project assumes no Byzantine faults | — |
 
 ### The failover gap, step by step (closed in phase 4)
@@ -752,6 +752,6 @@ sequenceDiagram
 | Mark | One `EpochChange` per epoch and topic, none for topics with no records | Old-epoch records staying unconfirmed (Raft's no-op entry); stray folders |
 | After | A broker that leads epoch N refuses another leader of epoch N, but accepts N+1 | Two leaders of one epoch writing into a leader's log, without blocking a replaced leader from following |
 
-**Where.** [LeaderPromotion.cs](../src/K0sStreams.Replication/Failover/LeaderPromotion.cs), [PeerSurvey.cs](../src/K0sStreams.Replication/Failover/PeerSurvey.cs), [LogCatchUp.cs](../src/K0sStreams.Replication/Failover/LogCatchUp.cs), [EpochChangeWriter.cs](../src/K0sStreams.Replication/Failover/EpochChangeWriter.cs), and the guard in `AppendHandler.Fence`.
+**Where.** [LeaderPromotion.cs](../../src/K0sStreams.Replication/Failover/LeaderPromotion.cs), [PeerSurvey.cs](../../src/K0sStreams.Replication/Failover/PeerSurvey.cs), [LogCatchUp.cs](../../src/K0sStreams.Replication/Failover/LogCatchUp.cs), [EpochChangeWriter.cs](../../src/K0sStreams.Replication/Failover/EpochChangeWriter.cs), and the guard in `AppendHandler.Fence`.
 
 **Proven by** `LeaderPromotionTests` (14 scenarios on three complete brokers), plus `PeerSurveyTests`, `LogCatchUpTests` and `MajorityCallTests` for each step on its own.

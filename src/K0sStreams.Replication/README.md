@@ -1,6 +1,6 @@
 # Replication (block C): code map
 
-What lives where in this project. For the design, see [docs/replication.md](../../docs/replication.md). For a guide to each class, see [docs/replication-code-guide.md](../../docs/replication-code-guide.md).
+What lives where in this project. For the design, see [docs/replication.md](../../docs/replication.md). For a guide to each class, see [docs/replication-code-guide.md](../../docs/history/replication-code-guide.md).
 
 ## Folders
 

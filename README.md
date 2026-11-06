@@ -210,7 +210,9 @@ Si hay atraso se recorta, en este orden: CRD Topic, Server-Sent Events, varias p
 
 ## Documentación
 
-- [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md): documento técnico completo (flujos, interfaces C#, formato en disco, servicio gRPC).
-- [docs/chaos.md](docs/chaos.md), [docs/benchmark.md](docs/benchmark.md) y [docs/topic-crd.md](docs/topic-crd.md): suite de caos, benchmark y CRD Topic.
-- [Documento técnico en línea](https://claude.ai/artifact/Wfp6im7Nn4MuKNvBEVtbDu): la misma arquitectura, con diagramas renderizados.
-- [docs/K0sStreams_Analisis_y_Plan(1).docx.pdf](<docs/K0sStreams_Analisis_y_Plan(1).docx.pdf>): análisis inicial y estimación de horas.
+- [docs/README.md](docs/README.md): índice y orden de lectura.
+- [docs/vision.md](docs/vision.md): visión original, evolución, límites y dirección.
+- [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md): diseño vigente, flujos, interfaces y estado de implementación.
+- [decisions.md](docs/decisions.md): registro de decisiones (ADR).
+- [docs/chaos.md](docs/chaos.md), [docs/benchmark.md](docs/benchmark.md) y [docs/topic-crd.md](docs/topic-crd.md): pruebas, benchmark y operación de tópicos.
+- [docs/history/](docs/history/): planes, iteraciones y documentos de etapas anteriores (incluye el análisis inicial y su estimación).

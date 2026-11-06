@@ -1,7 +1,7 @@
 # Estructura del proyecto, explicada desde cero
 
 Pantallazo de qué existe hoy en el repositorio, para alguien que no conoce .NET ni C#.
-Complementa a [ARQUITECTURA.md](ARQUITECTURA.md) (el diseño) y a [contexto.md](contexto.md) (el estado del código).
+Complementa a [ARQUITECTURA.md](../ARQUITECTURA.md) (el diseño) y a [contexto.md](contexto.md) (el estado del código).
 
 ---
 
@@ -12,8 +12,8 @@ Sin esto nada del repo se entiende:
 | Palabra | Qué es, en criollo |
 |---|---|
 | **Proyecto** (`.csproj`) | Una carpeta de código que se compila en **una** pieza reutilizable (una "librería") o en **un** programa ejecutable. El `.csproj` es su receta: qué librerías externas usa y de qué otros proyectos depende. Es el equivalente a un `package.json` por carpeta. |
-| **Solución** (`.slnx`) | La lista de todos los proyectos que forman el sistema. [K0sStreams.slnx](../K0sStreams.slnx) no tiene código: solo dice "estos 12 proyectos son parte de esto". |
-| **Interfaz** | Un **contrato**: la lista de operaciones que algo promete ofrecer, *sin* decir cómo las hace. Por convención su nombre empieza con `I`. Ej.: [ILog.cs](../src/K0sStreams.Contracts/ILog.cs) dice "el log sabe agregar un registro, leer registros y decirte su último offset" — pero no hay ni una línea que escriba en disco ahí. |
+| **Solución** (`.slnx`) | La lista de todos los proyectos que forman el sistema. [K0sStreams.slnx](../../K0sStreams.slnx) no tiene código: solo dice "estos 12 proyectos son parte de esto". |
+| **Interfaz** | Un **contrato**: la lista de operaciones que algo promete ofrecer, *sin* decir cómo las hace. Por convención su nombre empieza con `I`. Ej.: [ILog.cs](../../src/K0sStreams.Contracts/ILog.cs) dice "el log sabe agregar un registro, leer registros y decirte su último offset" — pero no hay ni una línea que escriba en disco ahí. |
 | **Implementación** | La clase que efectivamente cumple ese contrato (la que sí escribe en disco). |
 | **Fake** | Una implementación de juguete que cumple el contrato pero hace trampa (guarda todo en RAM en vez de en disco). Sirve para que el resto del equipo pueda programar y probar **antes** de que exista la pieza real. |
 | **Record** | Una forma corta de declarar "un paquetito de datos" (como un `struct`/objeto plano). `Record`, `TopicConfig`, `Delivery` son eso. Ojo con la confusión: en este proyecto la palabra `Record` también es el nombre de *un mensaje del log*. |
@@ -29,16 +29,16 @@ La solución: **primero se escribieron solo los contratos**, y todos los firmaro
 - La persona que hace la **API y la cola** (B) programa contra `ILog` *como si ya existiera*, usando el fake `InMemoryLog`.
 - Cuando A termina su versión real, B **no cambia nada** de su código: solo se intercambia la pieza.
 
-[src/K0sStreams.Contracts/](../src/K0sStreams.Contracts/) es, entonces, el "idioma común". Contiene:
+[src/K0sStreams.Contracts/](../../src/K0sStreams.Contracts/) es, entonces, el "idioma común". Contiene:
 
 - **5 contratos**: `ILog` (el log), `IQueueEngine` (la cola), `IReplicator` (copiar a otros brokers), `IClusterState` (quién es el líder), `ITopicCatalog` (qué tópicos existen).
-- **Los tipos de datos compartidos**: [Record.cs](../src/K0sStreams.Contracts/Record.cs) (un mensaje), [RecordType.cs](../src/K0sStreams.Contracts/RecordType.cs), [TopicConfig.cs](../src/K0sStreams.Contracts/TopicConfig.cs).
+- **Los tipos de datos compartidos**: [Record.cs](../../src/K0sStreams.Contracts/Record.cs) (un mensaje), [RecordType.cs](../../src/K0sStreams.Contracts/RecordType.cs), [TopicConfig.cs](../../src/K0sStreams.Contracts/TopicConfig.cs).
 - **Dos piezas de lógica real ya terminada**:
-  - [RecordCodec.cs](../src/K0sStreams.Contracts/RecordCodec.cs) — convierte un mensaje a bytes y al revés. Es el formato exacto de los bytes en disco (largo, CRC para detectar corrupción, offset, época, clave, valor). Es el archivo más grande del repo, 154 líneas, y **está funcionando**.
-  - [QueueEvent.cs](../src/K0sStreams.Contracts/QueueEvent.cs) — codifica un "recibí / confirmé / rechacé este mensaje" como si fuera otro mensaje más del log.
-- [Api/Dtos.cs](../src/K0sStreams.Contracts/Api/Dtos.cs) — la forma de los JSON que entran y salen por HTTP (`DTO` = paquetito de datos de transporte).
-- [Protos/replication.proto](../src/K0sStreams.Contracts/Protos/replication.proto) — el contrato de la comunicación **broker ↔ broker** (gRPC). Está escrito en otro lenguaje (Protobuf) y el compilador genera el C# solo.
-- [Fakes/](../src/K0sStreams.Contracts/Fakes/) — las 4 versiones de juguete.
+  - [RecordCodec.cs](../../src/K0sStreams.Contracts/RecordCodec.cs) — convierte un mensaje a bytes y al revés. Es el formato exacto de los bytes en disco (largo, CRC para detectar corrupción, offset, época, clave, valor). Es el archivo más grande del repo, 154 líneas, y **está funcionando**.
+  - [QueueEvent.cs](../../src/K0sStreams.Contracts/QueueEvent.cs) — codifica un "recibí / confirmé / rechacé este mensaje" como si fuera otro mensaje más del log.
+- [Api/Dtos.cs](../../src/K0sStreams.Contracts/Api/Dtos.cs) — la forma de los JSON que entran y salen por HTTP (`DTO` = paquetito de datos de transporte).
+- [Protos/replication.proto](../../src/K0sStreams.Contracts/Protos/replication.proto) — el contrato de la comunicación **broker ↔ broker** (gRPC). Está escrito en otro lenguaje (Protobuf) y el compilador genera el C# solo.
+- [Fakes/](../../src/K0sStreams.Contracts/Fakes/) — las 4 versiones de juguete.
 
 ## 3. El mapa completo
 
@@ -64,7 +64,7 @@ Los 5 primeros de `src/` son **librerías** (no se ejecutan solas). El único pr
 
 ## 4. Los 4 proyectos "vacíos" no están del todo vacíos
 
-Cada uno tiene exactamente **un** archivo: `ServiceCollectionExtensions.cs`. Ese nombre raro es un patrón de .NET; mirá [el de Storage](../src/K0sStreams.Storage/ServiceCollectionExtensions.cs):
+Cada uno tiene exactamente **un** archivo: `ServiceCollectionExtensions.cs`. Ese nombre raro es un patrón de .NET; mirá [el de Storage](../../src/K0sStreams.Storage/ServiceCollectionExtensions.cs):
 
 ```csharp
 services.AddSingleton<ILog, InMemoryLog>();
@@ -84,7 +84,7 @@ Y ahí está la gracia del diseño: los 4 pueden trabajar en paralelo sin pisars
 
 ## 5. El ejecutable: `Broker`
 
-[Program.cs](../src/K0sStreams.Broker/Program.cs) tiene 34 líneas y es el "main". Lo único que hace:
+[Program.cs](../../src/K0sStreams.Broker/Program.cs) tiene 34 líneas y es el "main". Lo único que hace:
 
 1. Llama una vez al registro de cada bloque (`AddK0sStorage`, `AddK0sQueue`, `AddK0sReplication`, `AddK0sCoordination`).
 2. Prende Swagger (la web que documenta y permite probar la API).
@@ -93,24 +93,24 @@ Y ahí está la gracia del diseño: los 4 pueden trabajar en paralelo sin pisars
 
 El comentario del archivo dice que `Program.cs` no debería editarse más: ya está terminado.
 
-[Api/ApiEndpoints.cs](../src/K0sStreams.Broker/Api/ApiEndpoints.cs) son 11 líneas con un `// Mapear acá las rutas` adentro. O sea: **la API REST del README todavía no existe**. Si corrés el broker hoy, responde `/health`, `/ready` y Swagger vacío, y nada más.
+[Api/ApiEndpoints.cs](../../src/K0sStreams.Broker/Api/ApiEndpoints.cs) son 11 líneas con un `// Mapear acá las rutas` adentro. O sea: **la API REST del README todavía no existe**. Si corrés el broker hoy, responde `/health`, `/ready` y Swagger vacío, y nada más.
 
-[appsettings.json](../src/K0sStreams.Broker/appsettings.json) es la configuración: abre el puerto **9090** para clientes (HTTP/1) y el **9091** para brokers entre sí (HTTP/2, que gRPC exige).
+[appsettings.json](../../src/K0sStreams.Broker/appsettings.json) es la configuración: abre el puerto **9090** para clientes (HTTP/1) y el **9091** para brokers entre sí (HTTP/2, que gRPC exige).
 
 ## 6. Los tests
 
 Un proyecto de tests por cada proyecto de `src/`, con la misma lógica: `K0sStreams.Storage.Tests` prueba `K0sStreams.Storage`. Cuatro de ellos están vacíos (solo el `.csproj`), esperando que haya código que probar.
 
-Los **39 tests que sí existen** están casi todos en `K0sStreams.Contracts.Tests`: verifican el formato de bytes, los eventos de cola, el particionador, la validación de nombres de tópico y el fake del log. Más [HostTests.cs](../tests/K0sStreams.Broker.Tests/HostTests.cs), que comprueba que el broker arranca y que cada contrato tenga alguien registrado.
+Los **39 tests que sí existen** están casi todos en `K0sStreams.Contracts.Tests`: verifican el formato de bytes, los eventos de cola, el particionador, la validación de nombres de tópico y el fake del log. Más [HostTests.cs](../../tests/K0sStreams.Broker.Tests/HostTests.cs), que comprueba que el broker arranca y que cada contrato tenga alguien registrado.
 
 ## 7. Las reglas del repo que te van a morder
 
-Están en [Directory.Build.props](../Directory.Build.props) y son estrictas a propósito:
+Están en [Directory.Build.props](../../Directory.Build.props) y son estrictas a propósito:
 
 - **`TreatWarningsAsErrors`**: cualquier advertencia del compilador **rompe la compilación**. No hay "ya lo arreglo después".
 - **Analizadores en `latest-recommended`**: además te marca cosas de estilo y de buenas prácticas, y eso también rompe el build.
 - **`Nullable enable`**: tenés que declarar explícitamente qué variables pueden ser nulas (`string?` vs `string`). Si no lo hacés bien → warning → error.
-- Las versiones de librerías van **solo** en `Directory.Packages.props`; en el `.csproj` se pone el nombre sin versión. Fijate en [K0sStreams.Storage.csproj](../src/K0sStreams.Storage/K0sStreams.Storage.csproj): tres líneas, ninguna con número de versión.
+- Las versiones de librerías van **solo** en `Directory.Packages.props`; en el `.csproj` se pone el nombre sin versión. Fijate en [K0sStreams.Storage.csproj](../../src/K0sStreams.Storage/K0sStreams.Storage.csproj): tres líneas, ninguna con número de versión.
 
 ---
 

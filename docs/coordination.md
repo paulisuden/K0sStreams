@@ -165,5 +165,5 @@ kubectl delete pod <líder> --grace-period=0 --force    # caída: otro lo toma e
 ## 10. Límites conocidos
 
 - **No borrar el Lease a mano.** Uno nuevo vuelve a empezar en la época 1, por debajo de la de los logs. El sistema se recupera solo (cada promoción fallida libera el Lease y el siguiente intento sube la época), pero tarda un ciclo por cada época que tiene que recuperar.
-- **Lecturas de un seguidor.** Un seguidor sigue la época del Lease, pero sus datos pueden estar un poco atrasados respecto del líder (tema abierto 4 de [contexto.md](contexto.md)).
+- **Lecturas de un seguidor.** Un seguidor sigue la época del Lease, pero sus datos pueden estar un poco atrasados respecto del líder (tema abierto 4 de [contexto.md](history/contexto.md)).
 - **Lo que pasa al cambiar de líder fuera de este bloque** lo resuelven A y B leyendo `CurrentEpoch`, sin escuchar `EpochChanged` (PR #16): la cola relee del log los eventos de un tópico la primera vez que se usa en cada época, y el catálogo de tópicos vive en el tópico interno `k0s.topics` ([DEC-003](decisions.md)), así que un líder nuevo lo lee del log. La suite de caos ([chaos.md](chaos.md)) lo comprueba matando al líder.
