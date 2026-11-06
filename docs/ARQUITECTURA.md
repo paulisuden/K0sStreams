@@ -112,8 +112,8 @@ Las transiciones de entrega (receive, ack, nack, timeout) no se escriben al log:
 
 1. broker-0 deja de renovar el Lease (se cayó o quedó aislado).
 2. Vence el Lease (por ejemplo, 10 s) y broker-1 lo toma.
-3. broker-1 sube la época (de N a N+1) y la escribe en su log.
-4. broker-1 trunca lo que no estaba confirmado por quórum y empieza a aceptar escrituras.
+3. broker-1 sube la época (de N a N+1), encuesta a la mayoría y copia el log más completo.
+4. Cuando termina la puesta al día, escribe el cambio de época y empieza a aceptar escrituras. No trunca datos confirmados.
 5. Si broker-0 vuelve con época N, sus réplicas y escrituras se rechazan (fencing). Se pone al día como seguidor.
 
 ## Contratos entre componentes
@@ -341,7 +341,7 @@ La documentación final (≈ 20 h) se reparte: cada uno escribe la sección de s
 | 1. PoC | Segmentos, índice, CRC, recuperación | API + cola básica sobre el fake, luego sobre el log real | Servidor gRPC vacío; ayuda a A con tests | Pod en minikube con PVC, health probes |
 | 2. Cola + gRPC | Group commit, truncado | Reintentos, DLQ, programados | Append, Fetch, GetState entre 2 procesos | docker compose de 3 nodos; Lease básico |
 | 3. Replicación | High watermark en ILog | Leer solo hasta high watermark; redirección al líder | Quórum y catch-up | StatefulSet de 3 + MetalLB |
-| 4. Failover | Truncar al cambiar de época | Reconstruir cola al ser líder | Rechazo por época en Append | Lease, épocas, fencing |
+| 4. Failover | Promover líder con catch-up | Descartar leases y reentregar | Rechazo por época en Append | Lease, épocas, fencing |
 | 5. Caos y CRD | Recuperación de archivos dañados | Verificador de mensajes | Pruebas de seguidor atrasado | Suite de caos, CRD Topic |
 
 C y D son los bloques más difíciles (fases 3 y 4). Conviene que A y B, que terminan antes, pasen a revisar y probar esos bloques desde la fase 4. Así todos pueden explicar la parte distribuida en la defensa.

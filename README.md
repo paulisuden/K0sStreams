@@ -54,7 +54,7 @@ Las decisiones principales:
 
 1. El líder deja de renovar el Lease.
 2. El Lease vence (≈10 s) y otro broker lo toma.
-3. El nuevo líder sube la **época** y descarta lo que no estaba confirmado por quórum.
+3. El nuevo líder sube la **época**, encuesta a la mayoría y copia el log más completo antes de aceptar escrituras. No trunca datos confirmados.
 4. Si el líder viejo vuelve, sus mensajes llevan una época vieja y se rechazan. Se reincorpora como seguidor.
 
 El detalle completo (flujos, formato en disco, contratos) está en [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md).
