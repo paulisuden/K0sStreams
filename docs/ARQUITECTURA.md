@@ -4,7 +4,11 @@ Middlewares Distribuidos · 22 de septiembre de 2026
 
 ## Resumen
 
-K0sStreams es un broker de mensajes en .NET que corre como 3 pods en k0s. Cada tópico se lee como historial (tipo Kafka) o como cola de trabajo (tipo SQS). Esta arquitectura fija cinco decisiones que ordenan todo el desarrollo:
+**Un log distribuido y una cola de trabajo para Kubernetes.**
+
+K0sStreams es un middleware de mensajería en .NET que corre como tres brokers en Kubernetes. Cada tópico es un log append-only replicado y se lee de dos formas sobre los mismos datos: historial tipo Kafka y cola de trabajo tipo SQS. Un líder electo por el Lease del cluster ordena las escrituras y las confirma cuando están en 2 de 3 brokers. No es un clon de Kafka: la replicación da alta disponibilidad, no escala de escritura.
+
+Este documento describe el diseño vigente; las decisiones están en [decisions.md](decisions.md).
 
 | Decisión | Qué se usa | Qué reemplaza |
 | --- | --- | --- |

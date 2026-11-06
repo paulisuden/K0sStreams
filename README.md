@@ -1,6 +1,10 @@
 # K0sStreams
 
-Broker de mensajes distribuido escrito en .NET. Corre como 3 pods en un cluster Kubernetes (k0s) y tolera la caída de uno sin perder mensajes confirmados.
+**Un log distribuido y una cola de trabajo para Kubernetes.**
+
+K0sStreams es un middleware de mensajería escrito en .NET que corre como tres brokers en Kubernetes. Expone por HTTP un log append-only replicado y, sobre los mismos datos, dos contratos de lectura: historial tipo Kafka y cola de trabajo tipo SQS. Un líder electo por el Lease del cluster ordena las escrituras y las confirma cuando están en 2 de 3 brokers.
+
+No es un clon de Kafka: es un log distribuido con una cola encima, pensado para clusters chicos donde Kafka es más infraestructura de la que hace falta.
 
 Proyecto de la materia **Middlewares Distribuidos** (2026).
 
