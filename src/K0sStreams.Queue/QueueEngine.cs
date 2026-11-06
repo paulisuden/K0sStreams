@@ -5,27 +5,39 @@ using K0sStreams.Contracts;
 namespace K0sStreams.Queue;
 
 /// <summary>
-/// Motor de cola (tipo SQS) sobre el log. El estado de cada cola vive en el log como
-/// <see cref="QueueEvent"/>; este tipo solo lo materializa para responder rápido, y
-/// <see cref="Apply"/> lo reconstruye cuando un broker nuevo se vuelve líder.
+/// Motor de cola (tipo SQS) sobre el log. El log guarda los mensajes y, como estado
+/// durable de la cola, solo los offsets confirmados y las marcas de DLQ. Todo lo demás
+/// (entregas en proceso, visibilidad, reintentos, miembros del grupo) vive en memoria
+/// y se descarta al cambiar de líder: volver a entregar es correcto en at-least-once.
 /// </summary>
-/// <param name="log">Log append-only. Única fuente de verdad.</param>
+/// <param name="log">Log append-only. Única fuente de verdad de los mensajes.</param>
 /// <param name="catalog">Tópicos existentes y su configuración.</param>
 /// <param name="cluster">Rol y época de este broker.</param>
-/// <param name="replicator">Confirma cada evento de cola por quórum, igual que un mensaje.</param>
-/// <param name="time">Reloj, inyectado para poder probar el visibility timeout.</param>
+/// <param name="replicator">Confirma los offsets y las marcas de DLQ por quórum.</param>
+/// <param name="time">Reloj, inyectado para poder probar visibilidad y auto-commit.</param>
 public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState cluster, IReplicator replicator, TimeProvider time) : IQueueEngine, IDisposable
 {
-    private readonly ConcurrentDictionary<string, QueueState> _queues = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, ConsumerGroupState> _consumerGroups = new(StringComparer.Ordinal);
+    /// <summary>Ventana máxima de acks que se pueden perder en un failover.</summary>
+    private static readonly TimeSpan AutoCommitInterval = TimeSpan.FromSeconds(1);
 
-    // Offsets confirmados por consumidor por (tópico/cola/partición). Un receive nunca
-    // entrega un offset menor o igual al confirmado para esa cola+partición.
+    /// <summary>Un consumidor deja de pertenecer al grupo si no late en este plazo.</summary>
+    private static readonly TimeSpan SessionTimeout = TimeSpan.FromSeconds(45);
+
+    private const int BatchSize = 512;
+
+    private readonly ConcurrentDictionary<(string Topic, string Queue), QueueState> _queues = new();
+    private readonly ConcurrentDictionary<(string Topic, string Queue), ConsumerGroupState> _consumerGroups = new();
+
+    // Offsets confirmados por (tópico/cola/partición). Solo se alimenta de eventos OffsetCommit.
     private readonly ConcurrentDictionary<string, long> _committedOffsets = new(StringComparer.Ordinal);
 
-    // Época en la que se releyó cada tópico desde el log, y un semáforo para que se relea una sola vez (ver EnsureRebuiltAsync).
+    // Época en la que se releyó cada tópico desde el log, y un semáforo para que se relea una sola vez.
     private readonly ConcurrentDictionary<string, long> _rebuiltInEpoch = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _rebuilding = new(1, 1);
+
+    // Serializa los volcados de offsets para no escribir dos veces el mismo cursor.
+    private readonly SemaphoreSlim _flushing = new(1, 1);
+    private DateTimeOffset _lastFlush = DateTimeOffset.MinValue;
 
     /// <inheritdoc />
     public async ValueTask<Delivery?> ReceiveAsync(string topic, string queue, string consumerId, TimeSpan visibility, CancellationToken ct = default)
@@ -35,26 +47,29 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             throw new ArgumentOutOfRangeException(nameof(visibility), visibility, "La visibilidad tiene que ser mayor que cero.");
         }
 
-        TopicConfig? topicConfig = catalog.Find(topic) ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+        TopicConfig topicConfig = catalog.Find(topic)
+            ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
+        await MaybeFlushAsync(ct).ConfigureAwait(false);
 
-        var groupKey = Key(topic, queue);
-        var group = _consumerGroups.GetOrAdd(groupKey, _ => new ConsumerGroupState(topicConfig.Partitions));
+        ConsumerGroupState group = _consumerGroups.GetOrAdd(
+            (topic, queue),
+            _ => new ConsumerGroupState(topicConfig.Partitions, time));
 
-        // Verify consumer is in group and get assigned partitions
-        var assignment = group.GetAssignment(consumerId);
+        // Si el consumidor no está en el grupo (p. ej. lo echó un rebalance) no recibe nada.
+        ConsumerAssignment? assignment = group.GetAssignment(consumerId);
         if (assignment is null || assignment.Partitions.Count == 0)
         {
             K0sMetrics.RecordQueueReceive(topic, queue, "not_assigned");
-            return null; // Consumer not in group or no partitions assigned
+            return null;
         }
 
-        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
+        QueueState state = StateOf(topic, queue);
 
-        // Se lee hasta el high watermark, no hasta el end offset: un mensaje que todavía no
-        // llegó a quórum no se puede entregar. Los eventos de cola del log se saltean.
-        var now = time.GetUtcNow();
-        var visibleUntil = now.Add(visibility);
+        // Se lee hasta el high watermark: un mensaje que todavía no llegó a quórum no se entrega.
+        DateTimeOffset now = time.GetUtcNow();
+        DateTimeOffset visibleUntil = now.Add(visibility);
 
         foreach (int partition in assignment.Partitions)
         {
@@ -64,20 +79,21 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                 continue;
             }
 
-            // No volver a entregar offsets ya confirmados por este consumidor en esta cola.
-            long scanFrom = _committedOffsets.GetOrAdd(Key(topic, queue, partition), -1) + 1;
+            // Desde el mayor entre lo confirmado y lo ya resuelto: nada por debajo vuelve a entregarse.
+            long scanFrom = state.ScanFrom(partition);
             while (scanFrom <= highWatermark)
             {
                 Record? found = null;
                 long lastScanned = scanFrom - 1;
                 int foundAttempt = 0;
-                DateTimeOffset foundUntil = default;
 
                 await foreach (var record in log.ReadAsync(topic, partition, scanFrom, BatchSize, ct).ConfigureAwait(false))
                 {
                     lastScanned = record.Offset;
                     if (record.Type != RecordType.Message)
                     {
+                        // Los marcadores de offset/DLQ ocupan un offset del log pero no se entregan.
+                        state.MarkResolved(partition, record.Offset);
                         continue;
                     }
 
@@ -86,7 +102,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                         continue;
                     }
 
-                    int? attempt = state.TryBeginAttempt(partition, record.Offset, now, visibleUntil);
+                    int? attempt = state.TryBeginAttempt(partition, record.Offset, consumerId, now, visibleUntil);
                     if (attempt is null)
                     {
                         continue;
@@ -94,19 +110,13 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
 
                     found = record;
                     foundAttempt = attempt.Value;
-                    foundUntil = visibleUntil;
                     break;
                 }
 
                 if (found is not null)
                 {
-                    await AppendEventAsync(
-                        topic,
-                        new QueueEvent(RecordType.Receive, queue, partition, found.Offset, foundUntil.ToUnixTimeMilliseconds()),
-                        ct).ConfigureAwait(false);
-
                     K0sMetrics.RecordQueueReceive(topic, queue, "hit");
-                    return new Delivery(partition, found.Offset, found, foundAttempt, foundUntil);
+                    return new Delivery(partition, found.Offset, found, foundAttempt, visibleUntil);
                 }
 
                 if (lastScanned < scanFrom)
@@ -126,16 +136,15 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
     public async ValueTask<bool> AckAsync(string topic, string queue, int partition, long offset, CancellationToken ct = default)
     {
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
-        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
-        if (!state.TryAcknowledge(partition, offset))
+
+        QueueState state = StateOf(topic, queue);
+        if (!state.TryAcknowledge(partition, offset, out long cursor))
         {
             return false;
         }
 
-        await AppendEventAsync(
-            topic,
-            new QueueEvent(RecordType.Ack, queue, partition, offset, HastaMs: 0),
-            ct).ConfigureAwait(false);
+        // El ack es memoria; el cursor se vuelve durable en el próximo volcado o commit.
+        state.MarkDirty(partition, cursor);
         K0sMetrics.RecordQueueAck(topic, queue);
         return true;
     }
@@ -150,7 +159,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
 
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
-        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
+
+        QueueState state = StateOf(topic, queue);
         int? attempt = state.GetAttempt(partition, offset);
         if (attempt is null || attempt.Value == 0)
         {
@@ -163,14 +173,12 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
 
         DateTimeOffset now = time.GetUtcNow();
+
         if (attempt.Value > topicConfig.MaxRetries)
         {
-            state.MarkDeadLetter(partition, offset);
-            await AppendEventAsync(
-                topic,
-                // UntilMs 0: sin próximo intento. Así Apply lo reconstruye como DLQ y no como un reintento programado.
-                new QueueEvent(RecordType.Nack, queue, partition, offset, HastaMs: 0, reason),
-                ct).ConfigureAwait(false);
+            // La DLQ es el único evento de entrega que sí es un hecho durable.
+            state.MarkDeadLetter(partition, offset, reason);
+            await AppendDlqMarkerAsync(topic, queue, partition, offset, reason, ct).ConfigureAwait(false);
             K0sMetrics.RecordQueueNack(topic, queue, deadLettered: true);
             return true;
         }
@@ -181,14 +189,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         {
             delay = topicConfig.RetryBackoff;
         }
-        DateTimeOffset retryAt = now.Add(delay);
-        long untilMs = retryAt.ToUnixTimeMilliseconds();
-        state.ScheduleRetry(partition, offset, retryAt);
 
-        await AppendEventAsync(
-            topic,
-            new QueueEvent(RecordType.Nack, queue, partition, offset, untilMs, reason),
-            ct).ConfigureAwait(false);
+        state.ScheduleRetry(partition, offset, now.Add(delay));
         K0sMetrics.RecordQueueNack(topic, queue, deadLettered: false);
         return true;
     }
@@ -196,48 +198,58 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
     /// <inheritdoc />
     public async ValueTask<ConsumerAssignment> JoinGroupAsync(string topic, string queue, string consumerId, CancellationToken ct = default)
     {
-        TopicConfig? topicConfig = catalog.Find(topic) ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+        TopicConfig topicConfig = catalog.Find(topic)
+            ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
 
-        var groupKey = Key(topic, queue);
-        var group = _consumerGroups.GetOrAdd(groupKey, _ => new ConsumerGroupState(topicConfig.Partitions));
+        ConsumerGroupState group = _consumerGroups.GetOrAdd(
+            (topic, queue),
+            _ => new ConsumerGroupState(topicConfig.Partitions, time));
 
-        var assignment = group.Join(consumerId);
-        // El estado del grupo se persiste al salir o hacer heartbeat; el alta inicial vive en memoria
-        // hasta el siguiente cambio. Si el líder cae, el consumidor se vuelve a unir.
-
+        ConsumerAssignment assignment = group.Join(consumerId);
         return new ConsumerAssignment(consumerId, assignment.Partitions, assignment.Generation);
     }
 
     /// <inheritdoc />
     public async ValueTask LeaveGroupAsync(string topic, string queue, string consumerId, CancellationToken ct = default)
     {
-        TopicConfig? topicConfig = catalog.Find(topic) ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+        if (catalog.Find(topic) is null)
+        {
+            return;
+        }
+
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
 
-        var groupKey = Key(topic, queue);
-        if (_consumerGroups.TryGetValue(groupKey, out var group))
+        if (_consumerGroups.TryGetValue((topic, queue), out ConsumerGroupState? group))
         {
             group.Leave(consumerId);
-            await PersistGroupStateAsync(topic, queue, group, ct).ConfigureAwait(false);
         }
+
+        // Lo que tenía en proceso vuelve a estar disponible y sus acks se vuelcan ya.
+        if (_queues.TryGetValue((topic, queue), out QueueState? state))
+        {
+            state.ReleaseConsumer(consumerId);
+        }
+
+        await FlushAsync(ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async ValueTask<ConsumerAssignment> HeartbeatAsync(string topic, string queue, string consumerId, CancellationToken ct = default)
     {
-        TopicConfig? topicConfig = catalog.Find(topic) ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+        TopicConfig topicConfig = catalog.Find(topic)
+            ?? throw new InvalidOperationException($"El tópico '{topic}' no existe.");
+
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
 
-        var groupKey = Key(topic, queue);
-        if (!_consumerGroups.TryGetValue(groupKey, out var group))
+        // La membresía es efímera: el latido solo toca memoria, nunca el log.
+        if (!_consumerGroups.TryGetValue((topic, queue), out ConsumerGroupState? group))
         {
             throw new InvalidOperationException($"El consumidor '{consumerId}' no pertenece al grupo.");
         }
 
-        var assignment = group.Heartbeat(consumerId);
-        await PersistGroupStateAsync(topic, queue, group, ct).ConfigureAwait(false);
-
+        ConsumerAssignment assignment = group.Heartbeat(consumerId);
         return new ConsumerAssignment(consumerId, assignment.Partitions, assignment.Generation);
     }
 
@@ -251,37 +263,41 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
 
         await EnsureRebuiltAsync(topic, ct).ConfigureAwait(false);
 
-        var groupKey = Key(topic, queue);
-        if (!_consumerGroups.TryGetValue(groupKey, out var group))
+        if (!_consumerGroups.TryGetValue((topic, queue), out ConsumerGroupState? group))
         {
             throw new InvalidOperationException($"El consumidor '{consumerId}' no pertenece al grupo.");
         }
 
-        // Verify consumer owns the partitions
-        var assignment = group.GetAssignment(consumerId);
+        ConsumerAssignment? assignment = group.GetAssignment(consumerId);
         if (assignment is null)
         {
             throw new InvalidOperationException($"El consumidor '{consumerId}' no pertenece al grupo.");
         }
 
-        foreach (var (partition, offset) in offsets)
+        QueueState state = StateOf(topic, queue);
+
+        foreach ((int partition, long offset) in offsets)
         {
             if (!assignment.Partitions.Contains(partition))
             {
                 throw new InvalidOperationException($"El consumidor '{consumerId}' no tiene asignada la partición {partition}.");
             }
 
-            // Escribir el evento de confirmación al log y esperar quórum, igual que un mensaje.
-            var commitEvent = QueueEvent.ConfirmarOffset(queue, partition, offset);
-            long commitOffset = await log.AppendAsync(
-                topic,
-                partition,
-                commitEvent.ARegistro(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
-                ct).ConfigureAwait(false);
-            await replicator.WaitForQuorumAsync(topic, partition, commitOffset, null, ct).ConfigureAwait(false);
-
-            _committedOffsets.AddOrUpdate(Key(topic, queue, partition), offset, (_, existing) => Math.Max(existing, offset));
+            await AppendCommitAsync(topic, queue, partition, offset, ct).ConfigureAwait(false);
+            state.SetCommitted(partition, offset);
         }
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyDictionary<int, long> GetCommittedOffsets(string topic, string queue)
+    {
+        if (catalog.Find(topic) is null)
+        {
+            return new Dictionary<int, long>();
+        }
+
+        EnsureRebuiltAsync(topic, CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        return StateOf(topic, queue).CommittedSnapshot();
     }
 
     /// <inheritdoc />
@@ -292,17 +308,16 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             return [];
         }
 
-        // El contrato es sincrónico: se espera la relectura igual que GetDeadLetters ya espera la lectura del log.
+        // El contrato es sincrónico: se espera la relectura igual que antes.
         EnsureRebuiltAsync(topic, CancellationToken.None).AsTask().GetAwaiter().GetResult();
-        QueueState state = _queues.GetOrAdd(Key(topic, queue), _ => new QueueState());
+        QueueState state = StateOf(topic, queue);
         return state.GetDeadLetters(topic, queue, log);
     }
 
     /// <inheritdoc />
     public IReadOnlyList<ConsumerState> GetConsumerStates(string topic, string queue)
     {
-        var groupKey = Key(topic, queue);
-        if (!_consumerGroups.TryGetValue(groupKey, out var group))
+        if (!_consumerGroups.TryGetValue((topic, queue), out ConsumerGroupState? group))
         {
             return [];
         }
@@ -319,46 +334,42 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             return;
         }
 
-        var replayed = QueueEvent.DesdeRegistro(queueEvent);
+        QueueEvent replayed = QueueEvent.DesdeRegistro(queueEvent);
+        QueueState state = StateOf(topic, replayed.Cola);
+
         switch (replayed.Tipo)
         {
-            case RecordType.Receive or RecordType.Ack or RecordType.Nack or RecordType.Timeout:
-            {
-                QueueState state = _queues.GetOrAdd(Key(topic, replayed.Cola), _ => new QueueState());
-                state.Apply(replayed);
-                break;
-            }
-
+            // Los eventos de entrega de versiones anteriores se ignoran: esa información
+            // ya no es durable y su único efecto correcto es volver a entregar.
             case RecordType.OffsetCommit:
                 _committedOffsets.AddOrUpdate(
                     Key(topic, replayed.Cola, replayed.Particion),
                     replayed.OffsetObjetivo,
                     (_, existing) => Math.Max(existing, replayed.OffsetObjetivo));
+                state.SetCommitted(replayed.Particion, replayed.OffsetObjetivo);
                 break;
 
-            case RecordType.GroupState:
-                var miembros = QueueEvent.DeserializarEstadoDelGrupo(queueEvent.Value.Span, out long generacion);
-                if (miembros is not null)
-                {
-                    int partitions = catalog.Find(topic) is { } config ? config.Partitions : 1;
-                    var group = new ConsumerGroupState(partitions);
-                    group.RebuildFromPersisted(generacion, miembros);
-                    _consumerGroups[Key(topic, replayed.Cola)] = group;
-                }
+            case RecordType.Nack when replayed.HastaMs == 0:
+                state.ApplyDeadLetter(replayed.Particion, replayed.OffsetObjetivo, replayed.Razon);
                 break;
         }
     }
 
-    public void Dispose() => _rebuilding.Dispose();
+    public void Dispose()
+    {
+        _rebuilding.Dispose();
+        _flushing.Dispose();
+    }
 
-    private static string Key(string topic, string queue) => $"{topic}/{queue}";
+    private QueueState StateOf(string topic, string queue) =>
+        _queues.GetOrAdd((topic, queue), _ => new QueueState());
 
     private static string Key(string topic, string queue, int partition) => $"{topic}/{queue}/{partition}";
 
     /// <summary>
-    /// Relee del log los eventos de cola del tópico la primera vez que se usa en cada época. La memoria puede no coincidir
-    /// con el log, que es la fuente de verdad, al arrancar (está vacía) y al cambiar de líder (otro líder pudo escribir
-    /// eventos mientras tanto).
+    /// Relee del log los eventos durables del tópico la primera vez que se usa en cada época.
+    /// Solo interesan los offsets confirmados y las marcas de DLQ; el resto es información
+    /// de entrega que, por diseño, no se conserva.
     /// </summary>
     private async ValueTask EnsureRebuiltAsync(string topic, CancellationToken ct)
     {
@@ -368,7 +379,6 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             return;
         }
 
-        // Uno a la vez: si dos pedidos releyeran a la vez, cada evento se aplicaría dos veces.
         await _rebuilding.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -377,9 +387,16 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                 return;
             }
 
-            foreach (string key in _queues.Keys.Where(key => key.StartsWith(topic + "/", StringComparison.Ordinal)))
+            // El estado en memoria es del líder anterior; se descarta y se reconstruye.
+            foreach ((string Topic, string Queue) key in _queues.Keys.Where(key => key.Topic == topic))
             {
                 _queues.TryRemove(key, out _);
+            }
+
+            // La membresía también era del líder anterior: los consumidores se vuelven a unir.
+            foreach ((string Topic, string Queue) key in _consumerGroups.Keys.Where(key => key.Topic == topic))
+            {
+                _consumerGroups.TryRemove(key, out _);
             }
 
             await ReplayAsync(topic, ct).ConfigureAwait(false);
@@ -391,11 +408,12 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
     }
 
-    private bool IsRebuilt(string topic, long epoch) => _rebuiltInEpoch.TryGetValue(topic, out long rebuilt) && rebuilt == epoch;
+    private bool IsRebuilt(string topic, long epoch) =>
+        _rebuiltInEpoch.TryGetValue(topic, out long rebuilt) && rebuilt == epoch;
 
     /// <summary>
-    /// Aplica todos los eventos del log, no solo hasta el high watermark: un líder nuevo termina confirmando todo su log.
-    /// Recorre todas las particiones del tópico (según el catálogo), no solo la 0.
+    /// Recorre todas las particiones del tópico y aplica solo los eventos durables.
+    /// Un líder nuevo termina confirmando todo su log, por eso no se corta en el high watermark.
     /// </summary>
     private async ValueTask ReplayAsync(string topic, CancellationToken ct)
     {
@@ -421,75 +439,152 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         }
     }
 
-    private static IEnumerable<int> PartitionsRange(int partitions)
-    {
-        for (int i = 0; i < partitions; i++)
-        {
-            yield return i;
-        }
-    }
-
     /// <summary>
-    /// Escribe el evento y espera el quórum antes de responder, igual que un mensaje: si el líder cayera antes, el
-    /// nuevo líder podría no tener, por ejemplo, un ack ya confirmado al cliente, y volvería a entregar el mensaje.
+    /// Vuelca los cursores sucios si pasó la ventana de auto-commit. Se llama desde
+    /// <see cref="ReceiveAsync"/>: una cola se consume en bucle, así que el volcado
+    /// ocurre solo, sin un temporizador de fondo.
     /// </summary>
-    private async ValueTask AppendEventAsync(string topic, QueueEvent queueEvent, CancellationToken ct)
+    private async ValueTask MaybeFlushAsync(CancellationToken ct)
     {
-        long offset = await log.AppendAsync(
-            topic,
-            queueEvent.Particion,
-            queueEvent.ARegistro(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
-            ct).ConfigureAwait(false);
-        await replicator.WaitForQuorumAsync(topic, queueEvent.Particion, offset, null, ct).ConfigureAwait(false);
-    }
-
-    private async ValueTask PersistGroupStateAsync(string topic, string queue, ConsumerGroupState group, CancellationToken ct)
-    {
-        var members = new Dictionary<string, IReadOnlyList<int>>(StringComparer.Ordinal);
-        foreach (var state in group.GetAllStates())
+        if (time.GetUtcNow() - _lastFlush < AutoCommitInterval)
         {
-            members[state.ConsumerId] = state.AssignedPartitions;
+            return;
         }
 
-        var payload = QueueEvent.SerializarEstadoDelGrupo(group.Generation, members);
-        var record = new Record(
-            Record.Unassigned,
-            cluster.CurrentEpoch,
-            RecordType.GroupState,
-            time.GetUtcNow().ToUnixTimeMilliseconds(),
-            0,
-            Encoding.UTF8.GetBytes(queue),
-            payload);
-
-        long offset = await log.AppendAsync(topic, 0, record, ct).ConfigureAwait(false);
-        await replicator.WaitForQuorumAsync(topic, 0, offset, null, ct).ConfigureAwait(false);
+        await FlushAsync(ct).ConfigureAwait(false);
     }
 
-    private const int BatchSize = 512;
+    private async ValueTask FlushAsync(CancellationToken ct)
+    {
+        if (!await _flushing.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            return;
+        }
 
-    /// <summary>Estado materializado de una cola, reconstruible desde el log.</summary>
+        try
+        {
+            _lastFlush = time.GetUtcNow();
+            if (!cluster.IsLeader)
+            {
+                return;
+            }
+
+            foreach (((string Topic, string Queue) key, QueueState state) in _queues)
+            {
+                foreach ((int partition, long cursor) in state.DirtySnapshot())
+                {
+                    try
+                    {
+                        await AppendCommitAsync(key.Topic, key.Queue, partition, cursor, ct).ConfigureAwait(false);
+                        state.ClearDirty(partition, cursor);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // Queda sucio: se reintenta en la próxima ventana.
+                        state.MarkDirty(partition, cursor);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _flushing.Release();
+        }
+    }
+
+    private async ValueTask AppendCommitAsync(string topic, string queue, int partition, long offset, CancellationToken ct)
+    {
+        QueueEvent commitEvent = QueueEvent.ConfirmarOffset(queue, partition, offset);
+
+        long commitOffset = await log.AppendAsync(
+            topic,
+            partition,
+            commitEvent.ARegistro(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
+            ct).ConfigureAwait(false);
+
+        await replicator.WaitForQuorumAsync(topic, partition, commitOffset, null, ct).ConfigureAwait(false);
+
+        _committedOffsets.AddOrUpdate(
+            Key(topic, queue, partition),
+            offset,
+            (_, existing) => Math.Max(existing, offset));
+    }
+
+    private async ValueTask AppendDlqMarkerAsync(string topic, string queue, int partition, long offset, string? reason, CancellationToken ct)
+    {
+        QueueEvent marker = new(RecordType.Nack, queue, partition, offset, HastaMs: 0, reason);
+
+        long markerOffset = await log.AppendAsync(
+            topic,
+            partition,
+            marker.ARegistro(cluster.CurrentEpoch, time.GetUtcNow().ToUnixTimeMilliseconds()),
+            ct).ConfigureAwait(false);
+
+        await replicator.WaitForQuorumAsync(topic, partition, markerOffset, null, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Estado materializado de una cola. Lo durable es solo el cursor; el resto es efímero.</summary>
     private sealed class QueueState
     {
         private readonly object _gate = new();
-        private readonly Dictionary<(int Partition, long Offset), int> _attempts = [];
-        private readonly Dictionary<(int Partition, long Offset), DateTimeOffset> _visibleUntil = [];
+
+        // Último offset confirmado (durable, viene del log).
+        private readonly Dictionary<int, long> _committed = [];
+
+        // Último offset resuelto de forma contigua (acks y eventos internos).
+        private readonly Dictionary<int, long> _prefix = [];
+
+        private readonly Dictionary<(int Partition, long Offset), Lease> _inFlight = [];
         private readonly Dictionary<(int Partition, long Offset), DateTimeOffset> _scheduledUntil = [];
-        private readonly HashSet<(int Partition, long Offset)> _inFlight = [];
-        private readonly HashSet<(int Partition, long Offset)> _acknowledged = [];
+        private readonly Dictionary<(int Partition, long Offset), int> _attempts = [];
+        private readonly HashSet<(int Partition, long Offset)> _done = [];
         private readonly HashSet<(int Partition, long Offset)> _deadLettered = [];
         private readonly Dictionary<(int Partition, long Offset), string?> _lastReason = [];
+        private readonly HashSet<int> _dirty = [];
+
+        public Dictionary<int, long> CommittedSnapshot()
+        {
+            lock (_gate)
+            {
+                return new Dictionary<int, long>(_committed);
+            }
+        }
+
+        /// <summary>Primer offset que hay que mirar en una partición: nada por debajo se entrega.</summary>
+        public long ScanFrom(int partition)
+        {
+            lock (_gate)
+            {
+                long committed = _committed.GetValueOrDefault(partition, -1);
+                long prefix = _prefix.GetValueOrDefault(partition, -1);
+                return Math.Max(committed, prefix) + 1;
+            }
+        }
+
+        public void SetCommitted(int partition, long offset)
+        {
+            lock (_gate)
+            {
+                _committed[partition] = Math.Max(_committed.GetValueOrDefault(partition, -1), offset);
+                _prefix[partition] = Math.Max(_prefix.GetValueOrDefault(partition, -1), offset);
+                _dirty.Remove(partition);
+            }
+        }
 
         /// <summary>
-        /// Decide y confirma el intento bajo el mismo lock: si fueran dos pasos, dos receives
-        /// concurrentes podrían pasar la comprobación y entregar el mismo offset.
-        /// Devuelve el número de intento, o null si el mensaje no está disponible.
+        /// Decide y registra el intento bajo el mismo lock: si fueran dos pasos, dos receives
+        /// concurrentes podrían entregar el mismo offset.
         /// </summary>
-        public int? TryBeginAttempt(int partition, long offset, DateTimeOffset now, DateTimeOffset visibleUntil)
+        public int? TryBeginAttempt(int partition, long offset, string consumerId, DateTimeOffset now, DateTimeOffset visibleUntil)
         {
             lock (_gate)
             {
                 var key = (partition, offset);
-                if (_acknowledged.Contains(key) || _deadLettered.Contains(key))
+                if (_done.Contains(key) || _deadLettered.Contains(key))
                 {
                     return null;
                 }
@@ -498,44 +593,39 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
                 {
                     return null;
                 }
-                if (_scheduledUntil.ContainsKey(key) && now >= scheduled)
-                {
-                    _scheduledUntil.Remove(key);
-                }
 
-                // En proceso y sin vencer: todavía no se puede volver a entregar.
-                if (_inFlight.Contains(key))
+                if (_inFlight.TryGetValue(key, out Lease lease))
                 {
-                    if (_visibleUntil.TryGetValue(key, out DateTimeOffset until2) && now < until2)
+                    if (now < lease.VisibleUntil)
                     {
                         return null;
                     }
+
                     _inFlight.Remove(key);
-                    _visibleUntil.Remove(key);
                 }
 
-                _inFlight.Add(key);
-                _visibleUntil[key] = visibleUntil;
                 _attempts.TryGetValue(key, out int attempt);
                 attempt++;
                 _attempts[key] = attempt;
+                _inFlight[key] = new Lease(consumerId, visibleUntil);
                 return attempt;
             }
         }
 
-        public bool TryAcknowledge(int partition, long offset)
+        public bool TryAcknowledge(int partition, long offset, out long cursor)
         {
             lock (_gate)
             {
                 var key = (partition, offset);
                 if (!_inFlight.Remove(key))
                 {
+                    cursor = 0;
                     return false;
                 }
 
-                _visibleUntil.Remove(key);
                 _scheduledUntil.Remove(key);
-                _acknowledged.Add(key);
+                _done.Add(key);
+                cursor = AdvancePrefix(partition);
                 return true;
             }
         }
@@ -545,22 +635,13 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 var key = (partition, offset);
-                if (_acknowledged.Contains(key) || _deadLettered.Contains(key))
+                if (_done.Contains(key) || _deadLettered.Contains(key))
                 {
                     return null;
-                }
-
-                if (!_inFlight.Contains(key) && !_scheduledUntil.ContainsKey(key))
-                {
-                    // could be in-flight? check
                 }
 
                 _attempts.TryGetValue(key, out int attempt);
-                if (attempt == 0)
-                {
-                    return null;
-                }
-                return attempt;
+                return attempt == 0 ? null : attempt;
             }
         }
 
@@ -569,13 +650,11 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 var key = (partition, offset);
-                if (!_inFlight.Contains(key))
+                if (!_inFlight.Remove(key))
                 {
                     return false;
                 }
 
-                _inFlight.Remove(key);
-                _visibleUntil.Remove(key);
                 return true;
             }
         }
@@ -586,17 +665,91 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             {
                 var key = (partition, offset);
                 _inFlight.Remove(key);
-                _visibleUntil.Remove(key);
                 _scheduledUntil[key] = until;
             }
         }
 
-        public void MarkDeadLetter(int partition, long offset)
+        public void MarkDeadLetter(int partition, long offset, string? reason)
+        {
+            lock (_gate)
+            {
+                var key = (partition, offset);
+                _inFlight.Remove(key);
+                _scheduledUntil.Remove(key);
+                _deadLettered.Add(key);
+                _done.Add(key);
+                _lastReason[key] = reason;
+                long cursor = AdvancePrefix(partition);
+                if (cursor > _committed.GetValueOrDefault(partition, -1))
+                {
+                    _dirty.Add(partition);
+                }
+            }
+        }
+
+        /// <summary>Marca un offset que no es un mensaje (commit, marcador de DLQ) como resuelto.</summary>
+        public void MarkResolved(int partition, long offset)
+        {
+            lock (_gate)
+            {
+                var key = (partition, offset);
+                if (_done.Add(key))
+                {
+                    AdvancePrefix(partition);
+                }
+            }
+        }
+
+        public void ReleaseConsumer(string consumerId)
+        {
+            lock (_gate)
+            {
+                foreach (var key in _inFlight.Where(pair => pair.Value.ConsumerId == consumerId).Select(pair => pair.Key).ToList())
+                {
+                    _inFlight.Remove(key);
+                }
+            }
+        }
+
+        public void MarkDirty(int partition, long cursor)
+        {
+            lock (_gate)
+            {
+                if (cursor > _committed.GetValueOrDefault(partition, -1))
+                {
+                    _dirty.Add(partition);
+                }
+            }
+        }
+
+        public IReadOnlyList<(int Partition, long Cursor)> DirtySnapshot()
+        {
+            lock (_gate)
+            {
+                return [.. _dirty.Select(partition => (partition, _prefix.GetValueOrDefault(partition, -1)))];
+            }
+        }
+
+        public void ClearDirty(int partition, long cursor)
+        {
+            lock (_gate)
+            {
+                if (_prefix.GetValueOrDefault(partition, -1) == cursor)
+                {
+                    _dirty.Remove(partition);
+                }
+            }
+        }
+
+        public void ApplyDeadLetter(int partition, long offset, string? reason)
         {
             lock (_gate)
             {
                 var key = (partition, offset);
                 _deadLettered.Add(key);
+                _done.Add(key);
+                _lastReason[key] = reason;
+                AdvancePrefix(partition);
             }
         }
 
@@ -605,109 +758,74 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 var result = new List<DeadLetter>();
-                foreach (var key in _deadLettered)
+                foreach ((int partition, long offset) in _deadLettered)
                 {
                     try
                     {
                         Record? record = null;
-                        var enumerator = log.ReadAsync(topic, key.Partition, key.Offset, 1).GetAsyncEnumerator();
+                        var enumerator = log.ReadAsync(topic, partition, offset, 1).GetAsyncEnumerator();
                         if (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
                         {
                             record = enumerator.Current;
                         }
+
                         enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult();
-                        if (record is not null && record.Offset == key.Offset)
+
+                        if (record is not null && record.Offset == offset)
                         {
-                            _attempts.TryGetValue(key, out int attempts);
-                            _lastReason.TryGetValue(key, out string? reason);
-                            result.Add(new DeadLetter(key.Partition, key.Offset, record, attempts, reason));
+                            _attempts.TryGetValue((partition, offset), out int attempts);
+                            _lastReason.TryGetValue((partition, offset), out string? reason);
+                            result.Add(new DeadLetter(partition, offset, record, attempts, reason));
                         }
                     }
                     catch
                     {
-                        // ignore
+                        // Un registro ya retenido fuera del log no se puede listar.
                     }
                 }
+
                 return result;
             }
         }
 
-        public void Apply(QueueEvent replayed)
+        /// <summary>
+        /// Avanza el cursor contiguo mientras los offsets siguientes estén resueltos. Devuelve el cursor nuevo.
+        /// Debe llamarse con el lock tomado.
+        /// </summary>
+        private long AdvancePrefix(int partition)
         {
-            lock (_gate)
+            long prefix = _prefix.GetValueOrDefault(partition, -1);
+            while (_done.Remove((partition, prefix + 1)))
             {
-                var key = (replayed.Particion, replayed.OffsetObjetivo);
-                switch (replayed.Tipo)
-                {
-                    case RecordType.Receive:
-                        // UntilMs es el fin de la visibilidad: hay que reconstruirlo también,
-                        // o un mensaje en proceso volvería a entregarse de inmediato.
-                        _inFlight.Add(key);
-                        _visibleUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.HastaMs);
-                        _attempts.TryGetValue(key, out int attemptReceive);
-                        _attempts[key] = attemptReceive + 1;
-                        break;
-                    case RecordType.Ack:
-                        _inFlight.Remove(key);
-                        _visibleUntil.Remove(key);
-                        _acknowledged.Add(key);
-                        break;
-                    case RecordType.Timeout:
-                        // Venció la visibilidad: el mensaje vuelve a estar disponible. Sin esto,
-                        // un Timeout del log se aceptaría y se ignoraría, dejando el mensaje
-                        // invisible para siempre. El número de intento se conserva.
-                        _inFlight.Remove(key);
-                        _visibleUntil.Remove(key);
-                        break;
-                    case RecordType.Nack:
-                        _inFlight.Remove(key);
-                        _visibleUntil.Remove(key);
-                        if (replayed.Razon is not null)
-                        {
-                            _lastReason[key] = replayed.Razon;
-                        }
-                        if (replayed.HastaMs > 0)
-                        {
-                            _scheduledUntil[key] = DateTimeOffset.FromUnixTimeMilliseconds(replayed.HastaMs);
-                        }
-                        else
-                        {
-                            _deadLettered.Add(key);
-                        }
-                        break;
-                    default:
-                        break;
-                }
+                prefix++;
             }
+
+            _prefix[partition] = prefix;
+            return prefix;
         }
+
+        private readonly record struct Lease(string ConsumerId, DateTimeOffset VisibleUntil);
     }
 
-    /// <summary>Estado del grupo de consumidores para una cola.</summary>
-    private sealed class ConsumerGroupState
+    /// <summary>
+    /// Coordinador de grupo en memoria. La membresía es efímera: si el líder cambia,
+    /// los consumidores se vuelven a unir. El reparto se recalcula entero cada vez que
+    /// cambia la membresía; nunca se acumula sobre el anterior.
+    /// </summary>
+    private sealed class ConsumerGroupState(int totalPartitions, TimeProvider time)
     {
         private readonly object _gate = new();
-        private readonly int _totalPartitions;
-        private readonly Dictionary<string, ConsumerMember> _members = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, DateTimeOffset> _members = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, int[]> _assignment = new(StringComparer.Ordinal);
         private long _generation;
-
-        public ConsumerGroupState(int totalPartitions)
-        {
-            _totalPartitions = totalPartitions;
-        }
 
         public ConsumerAssignment Join(string consumerId)
         {
             lock (_gate)
             {
-                if (!_members.TryGetValue(consumerId, out var member))
-                {
-                    member = new ConsumerMember(consumerId);
-                    _members[consumerId] = member;
-                }
-
-                member.LastHeartbeat = DateTimeOffset.UtcNow;
-                Rebalance();
-                return new ConsumerAssignment(consumerId, _members[consumerId].AssignedPartitions, _generation);
+                _members[consumerId] = time.GetUtcNow();
+                RebalanceIfNeeded();
+                return AssignmentOf(consumerId)!;
             }
         }
 
@@ -716,7 +834,7 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
             lock (_gate)
             {
                 _members.Remove(consumerId);
-                Rebalance();
+                RebalanceIfNeeded();
             }
         }
 
@@ -724,13 +842,14 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         {
             lock (_gate)
             {
-                if (!_members.TryGetValue(consumerId, out var member))
+                if (!_members.ContainsKey(consumerId))
                 {
                     throw new InvalidOperationException($"Consumer {consumerId} not in group.");
                 }
 
-                member.LastHeartbeat = DateTimeOffset.UtcNow;
-                return new ConsumerAssignment(consumerId, member.AssignedPartitions, _generation);
+                _members[consumerId] = time.GetUtcNow();
+                RebalanceIfNeeded();
+                return AssignmentOf(consumerId)!;
             }
         }
 
@@ -738,11 +857,8 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         {
             lock (_gate)
             {
-                if (_members.TryGetValue(consumerId, out var member))
-                {
-                    return new ConsumerAssignment(consumerId, member.AssignedPartitions, _generation);
-                }
-                return null;
+                RebalanceIfNeeded();
+                return AssignmentOf(consumerId);
             }
         }
 
@@ -750,68 +866,82 @@ public sealed class QueueEngine(ILog log, ITopicCatalog catalog, IClusterState c
         {
             lock (_gate)
             {
-                return [.. _members.Values.Select(m => new ConsumerState(m.ConsumerId, m.LastHeartbeat, m.AssignedPartitions))];
+                RebalanceIfNeeded();
+                return [.. _members.Select(pair =>
+                    new ConsumerState(pair.Key, pair.Value, _assignment.TryGetValue(pair.Key, out int[]? parts) ? parts : []))];
             }
         }
 
-        /// <summary>Generación actual del grupo (incrementa en cada rebalance).</summary>
-        public long Generation => _generation;
+        private ConsumerAssignment? AssignmentOf(string consumerId) =>
+            _assignment.TryGetValue(consumerId, out int[]? partitions)
+                ? new ConsumerAssignment(consumerId, partitions, _generation)
+                : null;
 
-        /// <summary>
-        /// Reconstruye el estado del grupo desde un evento GroupState persistido en el log.
-        /// Se usa cuando un broker se reinicia o se convierte en líder.
-        /// </summary>
-        internal void RebuildFromPersisted(long generacion, IReadOnlyDictionary<string, IReadOnlyList<int>> miembros)
+        /// <summary>Descarta miembros vencidos y reparte las particiones si cambió la membresía.</summary>
+        private void RebalanceIfNeeded()
         {
-            lock (_gate)
+            DateTimeOffset now = time.GetUtcNow();
+            var expired = _members
+                .Where(pair => now - pair.Value > SessionTimeout)
+                .Select(pair => pair.Key)
+                .ToList();
+
+            foreach (string member in expired)
             {
-                _generation = generacion;
-                _members.Clear();
-                foreach (var (consumerId, particiones) in miembros)
-                {
-                    var member = new ConsumerMember(consumerId);
-                    foreach (var p in particiones)
-                    {
-                        member.AssignedPartitions.Add(p);
-                    }
-                    member.LastHeartbeat = DateTimeOffset.UtcNow;
-                    _members[consumerId] = member;
-                }
+                _members.Remove(member);
             }
-        }
 
-        private void Rebalance()
-        {
-            // Cooperative sticky assignment: minimize partition movement
-            var activeMembers = _members.Values.Where(m => m.IsActive).OrderBy(m => m.ConsumerId).ToList();
-            if (activeMembers.Count == 0)
+            string[] active = [.. _members.Keys.Order(StringComparer.Ordinal)];
+
+            // Sin miembros no hay reparto, pero la generación igual avanza si había uno.
+            var desired = new Dictionary<string, int[]>(StringComparer.Ordinal);
+            foreach (string member in active)
+            {
+                desired[member] = [];
+            }
+
+            // Reparto determinista: partición i al miembro i % n, con la lista ordenada.
+            for (int partition = 0; partition < totalPartitions && active.Length > 0; partition++)
+            {
+                string owner = active[partition % active.Length];
+                desired[owner] = [.. desired[owner], partition];
+            }
+
+            if (SameAssignment(desired))
             {
                 return;
             }
 
-            _generation++;
-
-            // Distribute partitions evenly
-            var partitions = Enumerable.Range(0, _totalPartitions).ToList();
-            for (int i = 0; i < partitions.Count; i++)
+            // Solo una membresía o un reparto distinto justifica una generación nueva.
+            _assignment.Clear();
+            foreach ((string member, int[] partitions) in desired)
             {
-                var consumer = activeMembers[i % activeMembers.Count];
-                consumer.AssignedPartitions.Add(partitions[i]);
+                _assignment[member] = partitions;
+            }
+
+            if (_assignment.Count > 0 || _generation > 0)
+            {
+                _generation++;
             }
         }
 
-        private sealed class ConsumerMember
+        private bool SameAssignment(Dictionary<string, int[]> desired)
         {
-            public string ConsumerId { get; }
-            public DateTimeOffset LastHeartbeat { get; set; }
-            public List<int> AssignedPartitions { get; } = new();
-            public bool IsActive => (DateTimeOffset.UtcNow - LastHeartbeat) < TimeSpan.FromSeconds(30);
-
-            public ConsumerMember(string consumerId)
+            if (desired.Count != _assignment.Count)
             {
-                ConsumerId = consumerId;
-                LastHeartbeat = DateTimeOffset.UtcNow;
+                return false;
             }
+
+            foreach ((string member, int[] partitions) in desired)
+            {
+                if (!_assignment.TryGetValue(member, out int[]? current)
+                    || !current.SequenceEqual(partitions))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 }

@@ -37,6 +37,7 @@ internal static class ApiEndpoints
         topics.MapPost("/{topic}/queues/{queue}/nack/{partition:int}/{offset:long}", NackAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapPost("/{topic}/queues/{queue}/offsets", CommitOffsetsAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapGet("/{topic}/queues/{queue}/consumers", GetConsumerStatesAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapGet("/{topic}/queues/{queue}/offsets", GetCommittedOffsetsAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapGet("/{topic}/queues/{queue}/dlq", GetDeadLettersAsync).AddEndpointFilter(LeaderOnlyAsync);
 
         return endpoints;
@@ -421,6 +422,15 @@ internal static class ApiEndpoints
             s.LastHeartbeat,
             s.AssignedPartitions)).ToArray();
         return Results.Ok(response);
+    }
+
+    private static IResult GetCommittedOffsetsAsync(
+        string topic,
+        string queue,
+        IQueueEngine engine)
+    {
+        IReadOnlyDictionary<int, long> offsets = engine.GetCommittedOffsets(topic, queue);
+        return Results.Ok(new { topic, queue, offsets });
     }
 
     private static IResult GetDeadLettersAsync(

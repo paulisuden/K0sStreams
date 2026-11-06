@@ -26,7 +26,9 @@ public sealed record ConsumerState(string ConsumerId, DateTimeOffset LastHeartbe
 /// <summary>
 /// Semántica de cola (tipo SQS) sobre el log. Cada cola es un grupo de consumidores independiente:
 /// dos colas del mismo tópico reciben cada una todos los mensajes.
-/// Cada transición se escribe en el log como <see cref="QueueEvent"/>, así un nuevo líder reconstruye el estado.
+/// Lo durable es el log de mensajes, el offset confirmado de cada cola y las marcas de DLQ.
+/// La entrega en proceso, la visibilidad, los reintentos y la membresía son estado efímero
+/// del líder: si cambia, los mensajes sin confirmar se vuelven a entregar (at-least-once).
 /// </summary>
 public interface IQueueEngine
 {
@@ -50,6 +52,9 @@ public interface IQueueEngine
 
     /// <summary>Confirma el offset procesado por partición (commit de offset).</summary>
     ValueTask CommitOffsetsAsync(string topic, string queue, string consumerId, IReadOnlyDictionary<int, long> offsets, CancellationToken ct = default);
+
+    /// <summary>Offsets confirmados por partición para una cola: el estado durable de la cola.</summary>
+    IReadOnlyDictionary<int, long> GetCommittedOffsets(string topic, string queue);
 
     IReadOnlyList<DeadLetter> GetDeadLetters(string topic, string queue);
 
