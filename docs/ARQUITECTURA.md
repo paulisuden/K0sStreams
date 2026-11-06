@@ -16,7 +16,7 @@ Este documento describe el diseño vigente; las decisiones están en [decisions.
 | Comunicación entre brokers | gRPC en el puerto 9091 | Protocolo binario propio |
 | Elección de líder | Lease de Kubernetes (etcd garantiza uno solo) + épocas y fencing propios | Algoritmo casero "ID más bajo" |
 | Escritura en disco | Log append-only con group commit | fsync por mensaje |
-| Semántica | Historial y cola sobre el mismo log; el estado de la cola también es un evento del log | Solo stream |
+| Semántica | Historial y cola sobre el mismo log; el log es durable y la entrega en proceso es efímera | Solo stream |
 
 Consecuencia clave para el equipo: el log es la única fuente de verdad. La API, la cola y la replicación son capas que leen o escriben ese log. Eso permite trabajar en capas separadas con contratos fijos entre ellas.
 
@@ -28,7 +28,7 @@ Los tres brokers ejecutan el mismo binario y la misma imagen Docker. Solo cambia
 | --- | --- | --- | --- | --- |
 | API HTTP :9090 | ASP.NET Core Minimal APIs + Swagger | Recibe peticiones de clientes, valida, traduce a llamadas al motor | Atiende escrituras y lecturas | Lecturas, o redirige (HTTP 307) escrituras al líder |
 | gRPC interno :9091 | Grpc.AspNetCore + archivos .proto | Replicación y comandos entre brokers | Envía réplicas y espera 2 de 3 | Recibe réplicas y responde ack |
-| Motor de cola | C# puro (máquina de estados) | ack, nack, visibility timeout, reintentos con backoff, DLQ, programados | Decide y escribe eventos de cola | Reconstruye el estado leyendo el log |
+| Motor de cola | C# puro (máquina de estados) | ack, nack, visibility timeout, reintentos con backoff, DLQ, programados | Lleva la entrega en proceso en memoria | Descarta lo no confirmado; relee solo el cursor y la DLQ |
 | Log append-only | C# + FileStream | Segmentos, índice disperso, CRC32, group commit, recuperación | Escribe mensajes y eventos | Escribe lo que replica el líder |
 | PVC | StatefulSet volumeClaimTemplates | Disco persistente por pod | Igual | Igual |
 
@@ -106,7 +106,7 @@ stateDiagram-v2
     CONFIRMADO --> [*]
 ```
 
-Cada transición (receive, ack, nack, timeout) se escribe como un evento en el mismo log y se replica igual que un mensaje. Un seguidor que se vuelve líder reconstruye el estado de la cola leyendo esos eventos (event sourcing).
+Las transiciones de entrega (receive, ack, nack, timeout) no se escriben al log: viven en memoria. Lo único durable del motor de cola es el cursor confirmado (un evento `OffsetCommit` por partición) y las marcas de DLQ. Si cambia el líder, lo no confirmado se reentrega: la garantía es at-least-once, no la reconstrucción exacta del estado en proceso.
 
 ### Flujo 4: failover
 
@@ -156,7 +156,7 @@ public interface IQueueEngine {
     ValueTask<bool> AckAsync(string topic, string queue, int partition, long offset, CancellationToken ct = default);
     ValueTask<bool> NackAsync(string topic, string queue, int partition, long offset, string? reason, CancellationToken ct = default);
     IReadOnlyList<DeadLetter> GetDeadLetters(string topic, string queue);
-    void Apply(string topic, Record queueEvent);   // reconstruye estado desde el log
+    void Apply(string topic, Record queueEvent);   // aplica cursor confirmado y marcas de DLQ
 }
 
 public interface IReplicator {
