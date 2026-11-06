@@ -71,7 +71,7 @@ Benchmark en minikube de un nodo, directo al líder, mensajes de 100 bytes ([doc
 
 Una vez levantado, la documentación interactiva queda en `http://<host>:9090/swagger` y las
 métricas Prometheus (OpenTelemetry) en `http://<host>:9090/metrics`. El stack de Prometheus +
-Grafana con los tableros está en [`../broker-lab/observability`](../broker-lab/observability).
+Grafana con los tableros está en [`../cluster_k0s/07_skywatch/observability`](../cluster_k0s/07_skywatch/observability).
 
 | Método | Ruta | Para qué |
 | --- | --- | --- |

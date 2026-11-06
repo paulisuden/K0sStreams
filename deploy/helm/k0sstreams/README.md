@@ -110,7 +110,7 @@ Set `opentelemetry.otlpEndpoint` to your OTLP collector (e.g. Jaeger) to export 
 
 ```yaml
 opentelemetry:
-  otlpEndpoint: "http://jaeger.broker-lab.svc.cluster.local:4317"
+  otlpEndpoint: "http://jaeger.observability.svc.cluster.local:4317"
 ```
 
 When empty, traces are generated internally but not exported — useful for local development.
@@ -132,7 +132,7 @@ package public once in GitHub → Packages.
 
 ## Observability
 
-The chart does not include Jaeger, Prometheus, or Grafana. The lab stack (Prometheus,
-Grafana dashboards, Jaeger) lives in `adrzanbar/broker-lab`. Point
-`opentelemetry.otlpEndpoint` at Jaeger's OTLP gRPC port (4317), e.g.
-`http://jaeger.broker-lab.svc.cluster.local:4317`.
+The chart does not include Jaeger, Prometheus, or Grafana. The stack (Prometheus,
+Grafana dashboards, Jaeger) lives in the `cluster_k0s` step
+`07_skywatch/observability`. Point `opentelemetry.otlpEndpoint` at Jaeger's OTLP gRPC
+port (4317), e.g. `http://jaeger.observability.svc.cluster.local:4317`.
