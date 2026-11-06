@@ -107,6 +107,12 @@ Worth mentioning in the defense as the way the design would scale.
 2. Each block adapts in its own branch. For replication it's a small change, done right after the Contracts PR.
 3. Update the docs listed above.
 
+### Update (implementación)
+
+El contrato conserva `Partitions` para no romper firmas, rutas ni tests. La implementación usa **un solo log por tópico**: `SegmentedLog` indexa por nombre de tópico, el motor de cola trabaja sobre la partición 0 y el productor calcula una partición con el partitioner, pero el almacenamiento no la separa. En la práctica hay una sola partición lógica y no hay líderes por partición.
+
+Precisión: el valor por defecto de la CRD es `partitions: 1`, no 0. “0 particiones” no existe como valor; lo que existe es un log único y la partición 0. El líder del cluster es, por lo tanto, el líder de esa partición 0 en cada tópico.
+
 ---
 
 ## DEC-002 · Promote a new leader instead of truncating to the high watermark
