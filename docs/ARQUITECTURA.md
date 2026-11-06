@@ -160,7 +160,8 @@ public interface IQueueEngine {
 }
 
 public interface IReplicator {
-    ValueTask WaitForQuorumAsync(string topic, int partition, long offset, CancellationToken ct = default);
+    // Si el quórum no se alcanza antes de `timeout`, lanza QuorumLostException.
+    ValueTask WaitForQuorumAsync(string topic, int partition, long offset, TimeSpan? timeout = null, CancellationToken ct = default);
 }
 
 public interface IClusterState {
