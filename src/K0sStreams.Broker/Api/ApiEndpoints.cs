@@ -21,6 +21,10 @@ internal static class ApiEndpoints
         topics.MapPost("/{topic}/queues/{queue}/receive", ReceiveAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapPost("/{topic}/queues/{queue}/ack/{partition:int}/{offset:long}", AckAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapPost("/{topic}/queues/{queue}/nack/{partition:int}/{offset:long}", NackAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/join", JoinGroupCompatAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/leave", LeaveGroupCompatAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/heartbeat", HeartbeatCompatAsync).AddEndpointFilter(LeaderOnlyAsync);
+        topics.MapPost("/{topic}/queues/{queue}/offsets", CommitOffsetsCompatAsync).AddEndpointFilter(LeaderOnlyAsync);
         topics.MapGet("/{topic}/queues/{queue}/dlq", GetDeadLettersAsync).AddEndpointFilter(LeaderOnlyAsync);
 
         return endpoints;
@@ -233,6 +237,61 @@ internal static class ApiEndpoints
             ? Results.Ok(new { topic, queue, partition, offset })
             : Results.NotFound(new { error = "El mensaje no estaba en proceso en esa cola." });
     }
+
+    /// <summary>
+    /// Compatibilidad con clientes de la versión anterior (SkyWatch): la cola actual
+    /// no tiene grupos reales, así que join/heartbeat devuelven la partición 0 y un
+    /// commit de offsets es un no-op. El cursor real lo mantiene el broker al hacer ack.
+    /// </summary>
+    private static IResult JoinGroupCompatAsync(
+        string topic,
+        string queue,
+        JoinGroupRequest request,
+        ITopicCatalog catalog)
+    {
+        if (string.IsNullOrWhiteSpace(request.ConsumerId))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(request.ConsumerId)] = ["ConsumerId es requerido."],
+            });
+        }
+
+        if (catalog.Find(topic) is null)
+        {
+            return Results.NotFound(new { error = $"El tópico '{topic}' no existe." });
+        }
+
+        return Results.Ok(new JoinGroupResponse(request.ConsumerId, [0], Generation: 1));
+    }
+
+    private static IResult HeartbeatCompatAsync(
+        string topic,
+        string queue,
+        HeartbeatRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ConsumerId))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                [nameof(request.ConsumerId)] = ["ConsumerId es requerido."],
+            });
+        }
+
+        return Results.Ok(new HeartbeatResponse(request.ConsumerId, [0], Generation: 1));
+    }
+
+    private static IResult LeaveGroupCompatAsync(
+        string topic,
+        string queue,
+        LeaveGroupRequest request) =>
+        Results.Ok(new { topic, queue, consumerId = request.ConsumerId });
+
+    private static IResult CommitOffsetsCompatAsync(
+        string topic,
+        string queue,
+        CommitOffsetsRequest request) =>
+        Results.Ok(new { topic, queue, consumerId = request.ConsumerId });
 
     private static IResult GetDeadLettersAsync(
         string topic,

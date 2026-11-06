@@ -40,3 +40,18 @@ public sealed record DeliveryResponse(int Partition, long Offset, string? Key, s
 public sealed record NackRequest(string? Reason = null);
 
 public sealed record DeadLetterResponse(int Partition, long Offset, string? Key, string Value, int Attempts, string? LastReason);
+
+// Compatibilidad con clientes que hablan la API de consumer groups de la versión
+// anterior. La cola actual no asigna particiones: todos los consumidores de una
+// cola compiten por el próximo mensaje y el cursor lo lleva el broker.
+public sealed record JoinGroupRequest(string ConsumerId);
+
+public sealed record JoinGroupResponse(string ConsumerId, IReadOnlyList<int> Partitions, long Generation);
+
+public sealed record HeartbeatRequest(string ConsumerId);
+
+public sealed record HeartbeatResponse(string ConsumerId, IReadOnlyList<int> Partitions, long Generation);
+
+public sealed record LeaveGroupRequest(string ConsumerId);
+
+public sealed record CommitOffsetsRequest(string ConsumerId, IReadOnlyDictionary<int, long>? Offsets = null);
