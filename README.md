@@ -48,7 +48,7 @@ Las decisiones principales:
 - **Broker ↔ broker:** gRPC, puerto `9091`.
 - **Elección de líder:** Lease de Kubernetes (etcd garantiza que haya uno solo), más épocas y *fencing* propios para rechazar a un líder viejo.
 - **Disco:** log append-only con *group commit* (un `fsync` por lote, no por mensaje).
-- **Fuente de verdad única:** el log. Incluso el estado de la cola (receive, ack, nack, timeout) se guarda como eventos en el log, así un nuevo líder puede reconstruirlo.
+- **Fuente de verdad:** el log de mensajes. Del motor de cola solo son durables el cursor confirmado de cada cola y las marcas de DLQ; la entrega en proceso, la visibilidad y los reintentos viven en memoria y se reentregan si cambia el líder (at-least-once).
 
 ### ¿Qué pasa si se cae el líder?
 
