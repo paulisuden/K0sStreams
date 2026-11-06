@@ -5,11 +5,12 @@
 replicaCount: 3
 
 image:
-  # GHCR: el workflow de CI publica sha-<short> y latest en cada push a main,
-  # y después reescribe "tag" con el sha de esa imagen.
-  repository: ghcr.io/paulisuden/k0sstreams-broker
+  # Imagen con la que se despliega este chart. El CI publica en GHCR, pero el
+  # chart queda fijado a la imagen construida desde main para que el script de
+  # instalación no vuelva a una versión anterior.
+  repository: adrzanbar/k0sstreams-broker
   pullPolicy: IfNotPresent
-  tag: "sha-3500481"
+  tag: "original-scope-compat"
 
 # Si el paquete de GHCR queda privado, crear el secret en el namespace y listarlo acá.
 imagePullSecrets: []
