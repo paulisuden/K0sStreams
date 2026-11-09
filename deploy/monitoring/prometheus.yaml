@@ -73,6 +73,33 @@ data:
           - source_labels: [__meta_kubernetes_pod_name]
             action: replace
             target_label: instance
+
+      # SkyWatch expone Prometheus en el 9100, pero sus pods no llevan las anotaciones de arriba
+      # y sus manifiestos son de otro equipo (cluster_k0s/08_skywatch). Se los busca por su
+      # etiqueta app, en cualquiera de los dos namespaces: asi se puede comparar el mismo
+      # pipeline corriendo sobre K0sStreams y sobre Kafka.
+      - job_name: skywatch
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: skywatch-(producer|tracker|aggregator)
+          # El puerto de metricas no esta declarado en el pod, asi que se fija aca.
+          - source_labels: [__address__]
+            action: replace
+            regex: ([^:]+)(?::\d+)?
+            replacement: $1:9100
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: instance
 ---
 apiVersion: apps/v1
 kind: Deployment

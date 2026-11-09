@@ -1300,8 +1300,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(skywatch_positions_published_total[1m]))",
-          "legendFormat": "publicadas",
+          "expr": "sum by (namespace) (rate(skywatch_positions_published_total[1m]))",
+          "legendFormat": "publicadas · {{namespace}}",
           "range": true,
           "refId": "A"
         },
@@ -1311,8 +1311,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(skywatch_positions_consumed_total[1m]))",
-          "legendFormat": "consumidas",
+          "expr": "sum by (namespace) (rate(skywatch_positions_consumed_total[1m]))",
+          "legendFormat": "consumidas · {{namespace}}",
           "range": true,
           "refId": "B"
         }
@@ -1406,8 +1406,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(skywatch_positions_published_total)",
-          "legendFormat": "publicadas",
+          "expr": "sum by (namespace) (skywatch_positions_published_total)",
+          "legendFormat": "publicadas · {{namespace}}",
           "range": true,
           "refId": "A"
         },
@@ -1417,8 +1417,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(skywatch_positions_consumed_total)",
-          "legendFormat": "consumidas",
+          "expr": "sum by (namespace) (skywatch_positions_consumed_total)",
+          "legendFormat": "consumidas · {{namespace}}",
           "range": true,
           "refId": "B"
         }
@@ -1512,8 +1512,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(skywatch_alerts_published_total[1m]))",
-          "legendFormat": "alertas",
+          "expr": "sum by (namespace) (rate(skywatch_alerts_published_total[1m]))",
+          "legendFormat": "alertas · {{namespace}}",
           "range": true,
           "refId": "A"
         },
@@ -1523,8 +1523,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(skywatch_stats_published_total[1m]))",
-          "legendFormat": "estadisticas",
+          "expr": "sum by (namespace) (rate(skywatch_stats_published_total[1m]))",
+          "legendFormat": "estadisticas · {{namespace}}",
           "range": true,
           "refId": "B"
         }
@@ -1618,8 +1618,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(skywatch_errors_total[1m]))",
-          "legendFormat": "errores",
+          "expr": "sum by (namespace) (rate(skywatch_errors_total[1m]))",
+          "legendFormat": "errores · {{namespace}}",
           "range": true,
           "refId": "A"
         }
