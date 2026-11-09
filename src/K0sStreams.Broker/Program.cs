@@ -5,6 +5,7 @@ using K0sStreams.Contracts;
 using K0sStreams.Queue;
 using K0sStreams.Replication;
 using K0sStreams.Storage;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -17,13 +18,14 @@ builder.Services.AddK0sStorage(builder.Configuration);        // A
 builder.Services.AddK0sQueue(builder.Configuration);          // B
 builder.Services.AddK0sReplication(builder.Configuration);    // C
 builder.Services.AddK0sCoordination(builder.Configuration);   // D
+builder.Services.AddK0sMetrics();                             // /metrics, en formato Prometheus
 
 builder.Services.AddProblemDetails();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHealthChecks()
     // Liveness: el proceso responde. Si falla, Kubernetes reinicia el contenedor.
-    .AddCheck("live", () => HealthCheckResult.Healthy("El broker está en ejecución."))
+    .AddCheck("live", () => HealthCheckResult.Healthy("El broker está en ejecución."), tags: LiveTags)
     // Readiness: el broker puede atender tráfico. Un seguidor sin líder conocido no puede
     // recibir escrituras ni redirigirlas; un broker a mitad de una elección no sabe su rol.
     .AddCheck<ReadyHealthCheck>("ready", tags: ReadyTags);
@@ -34,11 +36,18 @@ app.UseExceptionHandler();
 app.UseSwagger();
 app.UseSwaggerUI();
 
-// /health y /ready ejecutan ambas comprobaciones. "live" siempre pasa si el proceso responde;
-// "ready" falla si no hay líder conocido, así que ambos endpoints devuelven unhealthy y
-// Kubernetes detiene el tráfico y reinicia el contenedor.
-app.MapHealthChecks("/health");
-app.MapHealthChecks("/ready");
+// Cada endpoint corre solo su comprobación: /health el liveness, /ready el readiness. Si /health
+// corriera también "ready", un broker que espera la elección fallaría el liveness, Kubernetes lo
+// reiniciaría y nunca llegaría a liderar.
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("live"),
+});
+app.MapHealthChecks("/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+});
+app.MapK0sMetrics();        // /metrics
 app.MapK0sApi();            // B
 app.MapK0sReplication();    // C
 
@@ -46,5 +55,6 @@ app.Run();
 
 public partial class Program
 {
+    private static readonly string[] LiveTags = ["live"];
     private static readonly string[] ReadyTags = ["ready"];
 }

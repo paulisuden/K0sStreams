@@ -11,6 +11,10 @@
     <PackageVersion Include="KubernetesClient" Version="19.0.2" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
+    <PackageVersion Include="OpenTelemetry" Version="1.20.0" />
+    <!-- El exportador Prometheus sigue en beta en todas sus versiones; es la última publicada. -->
+    <PackageVersion Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.20.0-beta.1" />
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.20.0" />
     <PackageVersion Include="Swashbuckle.AspNetCore" Version="10.2.3" />
     <PackageVersion Include="System.IO.Hashing" Version="10.0.12" />
   </ItemGroup>

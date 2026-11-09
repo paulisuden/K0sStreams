@@ -29,6 +29,14 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template
   name: ""
 
+# Anotaciones de los pods. Las prometheus.io/* son la convencion con la que un Prometheus
+# configurado con kubernetes_sd_configs descubre que pods scrapear, en que puerto y en que ruta.
+# El broker publica /metrics en el mismo puerto que la API (9090).
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
 broker:
   # Broker node ID. If not set, uses the pod name via downward API.
   nodeId: ""

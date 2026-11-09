@@ -5,6 +5,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="OpenTelemetry" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
     <PackageReference Include="Swashbuckle.AspNetCore" />
     <ProjectReference Include="../K0sStreams.Contracts/K0sStreams.Contracts.csproj" />
     <ProjectReference Include="../K0sStreams.Storage/K0sStreams.Storage.csproj" />

@@ -65,6 +65,11 @@ spec:
       app: broker
   template:
     metadata:
+      # Por donde Prometheus descubre el broker: /metrics en el mismo puerto que la API.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
       labels:
         app: broker
     spec:

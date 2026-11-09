@@ -1,0 +1,146 @@
+# Grafana para la demo: ya viene con el datasource Prometheus y con el tablero de K0sStreams
+# cargados, así que no hay que configurar nada a mano después de aplicarlo.
+# El tablero NO está acá: se carga en el ConfigMap grafana-dashboards desde
+# deploy/grafana/k0sstreams-dashboard.json (ver README.md de esta carpeta), para no tener
+# dos copias del mismo JSON que se desincronicen.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+  namespace: k0sstreams
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        # El uid fijo es lo que hace que el tablero encuentre el datasource sin elegirlo a mano.
+        uid: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: k0sstreams
+        orgId: 1
+        folder: K0sStreams
+        type: file
+        disableDeletion: false
+        # Se puede editar en la pantalla, pero el archivo manda: al recargar el ConfigMap
+        # vuelve a la versión del repo.
+        allowUiUpdates: true
+        updateIntervalSeconds: 10
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: k0sstreams
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        # La imagen de Grafana corre como el usuario 472.
+        runAsUser: 472
+        runAsNonRoot: true
+        fsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.2.5
+          env:
+            # Demo de cátedra: el profesor entra y mira sin usuario ni contraseña.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+            # Para editar hace falta entrar como admin. Cambiarlo si esto deja de ser una demo.
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin
+            # Al abrir la URL cae directo en el tablero del broker, sin buscarlo.
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /var/lib/grafana/dashboards/k0sstreams-dashboard.json
+            - name: GF_ANALYTICS_REPORTING_ENABLED
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: provisioning-datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: provisioning-dashboards
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+            - name: data
+              mountPath: /var/lib/grafana/data
+      volumes:
+        - name: provisioning-datasources
+          configMap:
+            name: grafana-provisioning
+            items:
+              - key: datasources.yaml
+                path: datasources.yaml
+        - name: provisioning-dashboards
+          configMap:
+            name: grafana-provisioning
+            items:
+              - key: dashboards.yaml
+                path: dashboards.yaml
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: k0sstreams
+  labels:
+    app: grafana
+spec:
+  # MetalLB le asigna una IP del pool: es la URL que se abre en el navegador.
+  # Sin loadBalancerIP fijo para no chocar con las IPs que ya están tomadas.
+  type: LoadBalancer
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
