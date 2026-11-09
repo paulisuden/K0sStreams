@@ -45,6 +45,9 @@ metadata:
     app: grafana
 spec:
   replicas: 1
+  # La imagen pesa 485 MiB y bajarla en este cluster tarda varios minutos. Con el plazo por
+  # defecto (10 min) el Deployment se da por vencido antes de que Grafana termine de arrancar.
+  progressDeadlineSeconds: 1800
   selector:
     matchLabels:
       app: grafana
@@ -79,35 +82,52 @@ spec:
               value: "false"
             - name: GF_ANALYTICS_CHECK_FOR_UPDATES
               value: "false"
+            # SQLite en modo WAL: muchísimos menos fsync. El disco de este cluster tarda unos
+            # segundos por migración, y Grafana corre cientos al primer arranque.
+            - name: GF_DATABASE_WAL
+              value: "true"
           ports:
             - name: http
               containerPort: 3000
               protocol: TCP
+          startupProbe:
+            # Hasta que esta sonda pase, Kubernetes no corre liveness ni readiness. Sin ella, el
+            # liveness mataba a Grafana a mitad de las migraciones y volvía a empezar de cero.
+            # 60 intentos cada 10 s: diez minutos de margen para el primer arranque.
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /api/health
               port: http
-            initialDelaySeconds: 10
           livenessProbe:
             httpGet:
               path: /api/health
               port: http
-            initialDelaySeconds: 30
+            periodSeconds: 20
           resources:
             requests:
               cpu: 100m
-              memory: 128Mi
+              memory: 256Mi
             limits:
-              memory: 512Mi
+              # 1 GiB porque acá entran dos cosas: Grafana y su base SQLite, que vive en un tmpfs
+              # (ver el volumen "data"). Lo que ocupa un tmpfs cuenta contra este límite, así que
+              # con 512 MiB el contenedor moría por falta de memoria al poco de arrancar.
+              memory: 1Gi
           volumeMounts:
             - name: provisioning-datasources
               mountPath: /etc/grafana/provisioning/datasources
             - name: provisioning-dashboards
               mountPath: /etc/grafana/provisioning/dashboards
+            # El emptyDir va en /var/lib/grafana, que es donde Grafana escribe su grafana.db:
+            # en la capa de escritura del contenedor sería todavía más lento.
+            - name: data
+              mountPath: /var/lib/grafana
             - name: dashboards
               mountPath: /var/lib/grafana/dashboards
-            - name: data
-              mountPath: /var/lib/grafana/data
       volumes:
         - name: provisioning-datasources
           configMap:
@@ -125,7 +145,15 @@ spec:
           configMap:
             name: grafana-dashboards
         - name: data
-          emptyDir: {}
+          # En memoria, no en disco. Grafana corre unas 700 migraciones de SQLite al arrancar y
+          # cada commit paga un fsync, que en el disco de este cluster tarda ~3 segundos: media
+          # hora de arranque. En tmpfs son segundos. No se pierde nada: el datasource y el tablero
+          # se reconstruyen de los ConfigMaps en cada arranque, y la base no guarda otra cosa.
+          emptyDir:
+            medium: Memory
+            # La base ronda las decenas de MiB. El tope acota cuánto del límite de memoria del
+            # contenedor puede comerse este volumen.
+            sizeLimit: 128Mi
 ---
 apiVersion: v1
 kind: Service
