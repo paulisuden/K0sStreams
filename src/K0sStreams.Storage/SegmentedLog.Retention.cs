@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using K0sStreams.Contracts;
 using Microsoft.Extensions.Logging;
 
 namespace K0sStreams.Storage;
@@ -26,9 +27,20 @@ public sealed partial class SegmentedLog
             return;
         }
 
+        OpenTopicsOnDisk(ct);
+
         foreach (var log in _topics.Values)
         {
             ct.ThrowIfCancellationRequested();
+
+            // El catálogo de tópicos no caduca: es metadato, no mensajes. Si se le borrara el primer
+            // segmento, los tópicos creados antes de la ventana desaparecerían y la API responderían
+            // 404 con los mensajes sanos en disco. Hoy además entra en un solo segmento y por eso se
+            // salvaría igual, pero eso es un accidente del tamaño de segmento, no una garantía.
+            if (log.Topic == LogTopicCatalog.TopicsLog)
+            {
+                continue;
+            }
 
             lock (log.Gate)
             {
@@ -43,6 +55,51 @@ public sealed partial class SegmentedLog
                     : 0;
 
                 DeleteOldest(log, Math.Max(byAge, bySize));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Abre los tópicos que están en disco y que este broker todavía no usó.
+    /// </summary>
+    /// <remarks>
+    /// Sin esto la retención solo limpiaría los tópicos que alguien pidió desde que arrancó el
+    /// proceso, que son justamente los que menos falta hace limpiar: un tópico grande que nadie
+    /// volvió a tocar después de un reinicio llenaría el disco igual. Corre en la pasada de fondo y
+    /// no en el arranque, así que las sondas de Kubernetes no esperan por esto.
+    /// </remarks>
+    private void OpenTopicsOnDisk(CancellationToken ct)
+    {
+        if (!Directory.Exists(DataDir))
+        {
+            return;
+        }
+
+        foreach (string path in Directory.EnumerateDirectories(DataDir))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            string topic = Path.GetFileName(path);
+
+            // Una carpeta cuyo nombre no es un tópico válido no la creó el log. No se avisa: esto
+            // corre en cada pasada y el aviso sería el mismo para siempre.
+            if (!TopicConfig.IsValidName(topic) || _topics.ContainsKey(topic))
+            {
+                continue;
+            }
+
+            try
+            {
+                // Abrirlo es recuperarlo: puede recortar una escritura cortada y rehacer un .index,
+                // lo mismo que haría el primer append o la primera lectura del tópico.
+                Get(topic, SingleLogPartition);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+            {
+                // Un log dañado no puede frenar la limpieza de los demás. Get ya registró el archivo
+                // y el byte; acá solo queda decir que la retención lo saltea. Avisa una sola vez por
+                // tópico, porque Get lo deja anotado en _topics aunque la recuperación falle.
+                LogRetentionSkippedTopic(_logger, ex, topic);
             }
         }
     }
@@ -214,4 +271,9 @@ public sealed partial class SegmentedLog
         Level = LogLevel.Warning,
         Message = "Ignored the log start of {Topic}: '{Contents}' is not an offset. Taking the first segment on disk as the start of the log.")]
     private static partial void LogUnreadableLogStart(ILogger logger, string topic, string contents);
+
+    [LoggerMessage(
+        Level = LogLevel.Warning,
+        Message = "Retention skipped {Topic}: its log could not be opened, so nothing was deleted from it.")]
+    private static partial void LogRetentionSkippedTopic(ILogger logger, Exception exception, string topic);
 }

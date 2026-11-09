@@ -7,10 +7,9 @@ public sealed partial class SegmentedLog
     /// <summary>Estado de un tópico: sus segmentos en orden y hasta dónde está confirmado.</summary>
     private sealed class TopicLog
     {
-        public TopicLog(string dataDir, string topic, int partition = 0)
+        public TopicLog(string dataDir, string topic)
         {
             Topic = topic;
-            Partition = partition;
             DirectoryPath = Path.Combine(dataDir, topic);
             CheckpointFile = Path.Combine(DirectoryPath, CheckpointFileName);
             LogStartFile = Path.Combine(DirectoryPath, LogStartFileName);
@@ -19,9 +18,6 @@ public sealed partial class SegmentedLog
 
         /// <summary>Nombre del tópico. Se usa para que los mensajes de log digan de cuál hablan.</summary>
         public string Topic { get; }
-
-        /// <summary>En este alcance hay un solo log por tópico; la partición es siempre 0.</summary>
-        public int Partition { get; }
 
         public Lock Gate { get; } = new();
 

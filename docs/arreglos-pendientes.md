@@ -15,11 +15,9 @@ Lo que falta corregir en cada bloque, con el archivo y la línea exactos y el ca
 | **C** | La replicación no sabe saltar al inicio del log: un seguidor atrasado no vuelve nunca | Alta | Necesita acuerdo de equipo (`Contracts`) |
 | **D** | `retention.maxAge` son 24 días y `maxBytes` es del tamaño del disco entero | Media | 3 valores |
 | **C** | `HasRecordAsync` valida el epoch pero no el offset del registro que le devuelve el log | Media | 1 línea |
-| **A** | La retención solo limpia los tópicos que el broker abrió desde que arrancó | Media | ~30 min |
 | **D** | La retención está apagada en `deploy/broker.yaml` y en `compose.yaml` | Media | 6 líneas |
 | **D** | `appsettings.k8s.json` no se carga nunca | Baja | 1 línea |
 | **B** | Los cuatro endpoints de compatibilidad no tienen ni un test | Baja | ~30 min |
-| **A** | `k0s.topics` se salva de la retención por accidente, no por diseño | Baja | ~10 min |
 | **D** | `compose.yaml` define dos claves de configuración que no existen | Baja | 2 líneas |
 | **B** | Sufijo `Async` en cuatro métodos que no son asíncronos | Baja | 4 líneas |
 | Compartido | `docs/contexto.md` describe el diseño anterior a DEC-001 y DEC-004 | Media | ~20 min |
@@ -30,41 +28,16 @@ Lo que falta corregir en cada bloque, con el archivo y la línea exactos y el ca
 
 ## Bloque A — Almacenamiento
 
-### A1 · La retención solo limpia los tópicos que el broker abrió · media
+**Sin pendientes.** Queda el registro de lo que se corrigió, para que nadie lo vuelva a hacer.
 
-**Dónde:** `src/K0sStreams.Storage/SegmentedLog.Retention.cs`, `ApplyRetention`.
+| | Qué estaba mal | Cómo quedó |
+| --- | --- | --- |
+| A1 | La retención recorría solo los tópicos que alguien había pedido desde que arrancó el proceso, así que un tópico grande que nadie volvió a tocar después de un reinicio llenaba el disco igual | La pasada de fondo abre primero los tópicos que están en disco (`OpenTopicsOnDisk`). Un log dañado o una carpeta con nombre inválido se saltea con un aviso, sin cortar la pasada |
+| A2 | `k0s.topics` se salvaba de la retención por accidente: entra en un solo segmento y el segmento del high watermark nunca se borra | Se excluye de forma explícita, porque es metadato y no caduca. Dos tests lo fijan: el catálogo nunca se poda, y un tópico de un solo segmento tampoco |
+| A3 | `TopicLog.Partition`, resto del alcance con particiones, no lo usaba nadie | Borrada, junto con el parámetro del constructor |
+| A4 | El tamaño de segmento era una constante de 64 MiB, así que la retención solo se podía ejercitar escribiendo más de 128 MiB: no era demostrable en una demo ni en `chaos/` | Nueva clave `Storage:SegmentBytes`, con 64 MiB por defecto. **Funciona sin configurarla**, así que D no está obligado a ponerla en `deploy/`, pero existe si se la quiere bajar para una demo |
 
-Recorre `_topics`, que se llena cuando alguien usa un tópico (`Get`). Un broker que reinicia y sirve solo el tópico X **nunca** limpia el tópico Y, aunque Y tenga 900 MiB en disco. Es justo lo único que la retención tiene que lograr.
-
-**Arreglo:** en la pasada de retención, recorrer las carpetas de `DataDir` y abrir las que todavía no estén en memoria. No es en el arranque sino en la pasada de fondo, así que no afecta a las sondas de Kubernetes. Un tópico dañado o una carpeta con nombre inválido se saltea con un aviso, sin cortar la pasada.
-
-### A2 · `k0s.topics` se salva de la retención por accidente · baja
-
-**Dónde:** `src/K0sStreams.Storage/LogTopicCatalog.cs:21` y `SegmentedLog.Retention.cs`, `Deletable`.
-
-El catálogo de tópicos vive en el tópico interno `k0s.topics` y se rearma leyendo desde el offset 0. Si la retención le borrara el primer segmento, se perderían los tópicos creados antes de la ventana y la API respondería 404 para todos, con los mensajes sanos en disco.
-
-Hoy no pasa porque `k0s.topics` cabe en un solo segmento (~450.000 tópicos con segmentos de 64 MiB) y un tópico de un solo segmento nunca se poda: ese segmento contiene el high watermark. Pero no está escrito en ningún lado ni cubierto por un test, así que basta que alguien baje el tamaño de segmento para romperlo.
-
-**Arreglo:** excluir `k0s.topics` de la retención de forma explícita, con un comentario que diga por qué (los tópicos no caducan), y un test que fije que un tópico de un solo segmento no se poda nunca.
-
-### A3 · Propiedad muerta en `SegmentedLog` · baja
-
-**Dónde:** `src/K0sStreams.Storage/SegmentedLog.TopicLog.cs`, `TopicLog.Partition` y el parámetro `partition` del constructor.
-
-Resto del alcance con particiones. Lo usaban los dos mensajes de log de la retención; reescritos esos mensajes, no lo usa nadie.
-
-**Arreglo:** borrar la propiedad y el parámetro. Dos líneas.
-
-### A4 · Opcional: tamaño de segmento configurable · baja
-
-El tamaño de segmento es la constante `SegmentedLog.DefaultSegmentBytes`, 64 MiB, y solo los tests la bajan. Consecuencia: la retención solo se puede ejercitar con más de 128 MiB de datos, así que **no es demostrable en la demo ni en `chaos/`**.
-
-**Arreglo:** exponerlo como `Storage:SegmentBytes` con 64 MiB por defecto, para que nada cambie sin configurarlo. Es una clave nueva: avisarle a D aunque no esté obligado a setearla.
-
-> **Ya arreglado, no lo vuelvan a hacer.** La rama `fix/storage-retention` corrige la retención completa: borrado por edad mirando el registro más nuevo de cada segmento, borrado por tamaño respetando `MaxBytes`, nunca el segmento del high watermark ni el activo ni los posteriores, archivo `log-start` con `fsync` para sobrevivir reinicios y cortes a mitad de un borrado, lectura por debajo del inicio que devuelve desde el inicio, replanificación si un segmento desaparece durante una lectura, y la tarea de fondo fuera del constructor en un `RetentionService` con `TimeProvider`. 16 tests nuevos. Ver DEC-005.
-
----
+Y antes, en el PR #22: el borrado por edad ahora mira el registro más nuevo de cada segmento, el borrado por tamaño respeta `MaxBytes`, ninguno toca el segmento del high watermark ni el activo ni los posteriores, el archivo `log-start` con `fsync` permite sobrevivir reinicios y cortes a mitad de un borrado, leer por debajo del inicio devuelve desde el inicio, una lectura que choca con un borrado se replanifica, y la tarea de fondo salió del constructor a un `RetentionService` con `TimeProvider`. Ver DEC-005.
 
 ## Bloque B — Cola y API
 
@@ -288,7 +261,7 @@ helm template deploy/helm/k0sstreams > /dev/null
 
 ## Un patrón que vale la pena mirar
 
-Las fallas A1, B1, B2 y C2 comparten la misma causa: **código que borra, escribe o expone algo sin un test que lo fije**. El CI (`.github/workflows/ci.yml`) corre `dotnet build`, `dotnet test` y la imagen Docker; no podía detectar ninguna de ellas, porque lo que faltaba eran los tests. La retención entró con el mensaje "All 368 tests pass", que era literalmente cierto y no significaba nada.
+Las fallas B1, B2, C2 y las de A que ya se corrigieron comparten la misma causa: **código que borra, escribe o expone algo sin un test que lo fije**. El CI (`.github/workflows/ci.yml`) corre `dotnet build`, `dotnet test` y la imagen Docker; no podía detectar ninguna de ellas, porque lo que faltaba eran los tests. La retención entró con el mensaje "All 368 tests pass", que era literalmente cierto y no significaba nada.
 
 Lo más barato que podemos hacer no es revisar más, es pedir **un test por cada cosa que borre, escriba o exponga una ruta nueva**.
 

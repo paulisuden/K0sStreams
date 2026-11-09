@@ -17,6 +17,11 @@ public static class ServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
+        services.AddOptions<StorageOptions>()
+            .Bind(configuration.GetSection(StorageOptions.SectionName))
+            .Validate(static o => o.IsValid(), "Storage: SegmentBytes does not fit what a segment can hold.")
+            .ValidateOnStart();
+
         services.AddOptions<RetentionOptions>()
             .Bind(configuration.GetSection(RetentionOptions.SectionName))
             .Validate(static o => o.IsValid(), "Retention: MaxAge and MaxBytes must be positive if set.")
@@ -26,7 +31,7 @@ public static class ServiceCollectionExtensions
         // loguear en lugar de no arrancar. El arranque rápido manda (CLAUDE.md, sondas de Kubernetes).
         services.AddSingleton(provider => new SegmentedLog(
             ResolveDataDir(configuration),
-            SegmentedLog.DefaultSegmentBytes,
+            provider.GetRequiredService<IOptions<StorageOptions>>().Value.SegmentBytes,
             provider.GetRequiredService<IOptions<RetentionOptions>>().Value,
             provider.GetService<ILogger<SegmentedLog>>()));
 

@@ -57,9 +57,10 @@ public sealed class RetentionTests : IDisposable
     private string Segmento(long baseOffset) =>
         Path.Combine(Carpeta, baseOffset.ToString("D20", CultureInfo.InvariantCulture) + Segment.Extension);
 
-    /// <summary>Nombres de los segmentos que quedan en disco, ordenados.</summary>
-    private string[] SegmentosEnDisco() =>
-        [.. Directory.GetFiles(Carpeta, "*" + Segment.Extension).Select(Path.GetFileName).Order()!];
+    /// <summary>Nombres de los segmentos que quedan en disco para ese tópico, ordenados.</summary>
+    private string[] SegmentosEnDisco(string topico = Topico) =>
+        [.. Directory.GetFiles(Path.Combine(_dataDir, topico), "*" + Segment.Extension)
+            .Select(Path.GetFileName).Order()!];
 
     /// <summary>
     /// Deja <paramref name="cuantos"/> segmentos llenos, cada uno escrito una hora después del
@@ -263,6 +264,83 @@ public sealed class RetentionTests : IDisposable
 
         // Lo que sobrevivió al borrado se sigue entregando; lo que no, se saltea sin tirar error.
         leidos.Should().Equal(0, 1, 2, 9, 10, 11);
+    }
+
+    [Fact]
+    public async Task La_retencion_limpia_un_topico_que_nadie_toco_desde_el_arranque()
+    {
+        await ConSegmentos(4, confirmado: 11);
+
+        // Un broker que reinicia y sirve otra cosa: su lista de tópicos en memoria arranca vacía, y
+        // este tópico igual tiene que limpiarse o el disco se llena con algo que nadie va a pedir.
+        var despues = Reiniciar(new RetentionOptions { MaxBytes = 2 * BytesPorSegmento });
+        despues.ApplyRetention(_tiempo.GetUtcNow());
+
+        SegmentosEnDisco().Should().Equal("00000000000000000006.log", "00000000000000000009.log");
+    }
+
+    [Fact]
+    public async Task El_catalogo_de_topicos_no_se_poda_nunca()
+    {
+        // Con límites imposibles de cumplir: el catálogo es metadato y no caduca. Si se le borrara
+        // el primer segmento, los tópicos viejos darían 404 con los mensajes sanos en disco.
+        var log = Reiniciar(new RetentionOptions { MaxAge = TimeSpan.FromMinutes(1), MaxBytes = 1 });
+        for (int i = 0; i < 4 * PorSegmento; i++)
+        {
+            await log.AppendAsync(LogTopicCatalog.TopicsLog, 0, Msg(_tiempo.GetUtcNow()));
+        }
+
+        log.AdvanceHighWatermark(LogTopicCatalog.TopicsLog, 0, (4 * PorSegmento) - 1);
+
+        log.ApplyRetention(_tiempo.GetUtcNow() + TimeSpan.FromDays(365));
+
+        SegmentosEnDisco(LogTopicCatalog.TopicsLog).Should().HaveCount(4);
+    }
+
+    [Fact]
+    public async Task Un_topico_de_un_solo_segmento_no_se_poda_nunca()
+    {
+        // Es lo que salva al catálogo incluso sin la exclusión explícita: su único segmento contiene
+        // el high watermark. Vale fijarlo, porque bajar el tamaño de segmento lo rompería.
+        var log = await ConSegmentos(
+            1, confirmado: 2, new RetentionOptions { MaxAge = TimeSpan.FromMinutes(1), MaxBytes = 1 });
+
+        log.ApplyRetention(_tiempo.GetUtcNow() + TimeSpan.FromDays(365));
+
+        SegmentosEnDisco().Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task El_tamanio_de_segmento_sale_de_la_configuracion()
+    {
+        // Sin esto la retención no se puede mostrar: con los 64 MiB por defecto hay que escribir más
+        // de 128 MiB en un tópico para que llegue a borrar un segmento.
+        using var services = new ServiceCollection()
+            .AddK0sStorage(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Broker:DataDir"] = _dataDir,
+                ["Storage:SegmentBytes"] = LimiteChico.ToString(CultureInfo.InvariantCulture),
+            }).Build())
+            .BuildServiceProvider();
+
+        var log = services.GetRequiredService<ILog>();
+        for (int i = 0; i < PorSegmento + 1; i++)
+        {
+            await log.AppendAsync(Topico, 0, Msg(_tiempo.GetUtcNow()));
+        }
+
+        SegmentosEnDisco().Should().HaveCount(2, "con ese límite entran tres registros por segmento");
+    }
+
+    [Fact]
+    public void Sin_configurar_el_tamanio_de_segmento_son_64_MiB()
+    {
+        using var services = new ServiceCollection()
+            .AddK0sStorage(new ConfigurationBuilder().Build())
+            .BuildServiceProvider();
+
+        services.GetRequiredService<IOptions<StorageOptions>>().Value.SegmentBytes
+            .Should().Be(SegmentedLog.DefaultSegmentBytes);
     }
 
     [Fact]
