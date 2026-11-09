@@ -86,6 +86,13 @@ spec:
             # segundos por migración, y Grafana corre cientos al primer arranque.
             - name: GF_DATABASE_WAL
               value: "true"
+            # La base va a un tmpfs (ver el volumen "data"), pero SOLO la base. Los plugins NO:
+            # Grafana copia 458 MiB al arrancar y, si comparten el tmpfs, la copia se queda sin
+            # espacio a mitad de camino y el datasource Prometheus no llega a cargarse.
+            - name: GF_PATHS_DATA
+              value: /var/lib/grafana-data
+            - name: GF_PATHS_PLUGINS
+              value: /var/lib/grafana/plugins
           ports:
             - name: http
               containerPort: 3000
@@ -122,10 +129,10 @@ spec:
               mountPath: /etc/grafana/provisioning/datasources
             - name: provisioning-dashboards
               mountPath: /etc/grafana/provisioning/dashboards
-            # El emptyDir va en /var/lib/grafana, que es donde Grafana escribe su grafana.db:
-            # en la capa de escritura del contenedor sería todavía más lento.
+            # Solo la base de datos, en GF_PATHS_DATA. /var/lib/grafana queda como viene en la
+            # imagen, con sus plugins.
             - name: data
-              mountPath: /var/lib/grafana
+              mountPath: /var/lib/grafana-data
             - name: dashboards
               mountPath: /var/lib/grafana/dashboards
       volumes:
@@ -145,14 +152,13 @@ spec:
           configMap:
             name: grafana-dashboards
         - name: data
-          # En memoria, no en disco. Grafana corre unas 700 migraciones de SQLite al arrancar y
+          # En memoria, no en disco. Grafana corre unas 800 migraciones de SQLite al arrancar y
           # cada commit paga un fsync, que en el disco de este cluster tarda ~3 segundos: media
           # hora de arranque. En tmpfs son segundos. No se pierde nada: el datasource y el tablero
           # se reconstruyen de los ConfigMaps en cada arranque, y la base no guarda otra cosa.
+          # Acá va SOLO la base (GF_PATHS_DATA), nunca los plugins: son 458 MiB y no entran.
           emptyDir:
             medium: Memory
-            # La base ronda las decenas de MiB. El tope acota cuánto del límite de memoria del
-            # contenedor puede comerse este volumen.
             sizeLimit: 128Mi
 ---
 apiVersion: v1
