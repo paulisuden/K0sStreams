@@ -1,35 +1,11 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Globalization;
-using System.Runtime.CompilerServices;
-using System.Threading;
-using System.Threading.Tasks;
 using K0sStreams.Contracts;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 
 namespace K0sStreams.Storage;
-
-/// <summary>
-/// Configuración de retención para SegmentedLog.
-/// </summary>
-public sealed class RetentionOptions
-{
-    public const string SectionName = "Retention";
-
-    /// <summary>Tiempo de vida máximo de los mensajes. <c>null</c> = sin límite por tiempo.</summary>
-    public TimeSpan? MaxAge { get; init; }
-
-    /// <summary>Tamaño máximo total por partición. <c>null</c> = sin límite por tamaño.</summary>
-    public long? MaxBytes { get; init; }
-
-    /// <summary>Intervalo entre comprobaciones de retención. Por defecto 5 minutos.</summary>
-    public TimeSpan CheckInterval { get; init; } = TimeSpan.FromMinutes(5);
-
-    /// <summary>Valida que la configuración sea coherente.</summary>
-    public bool IsValid() => (MaxAge is null || MaxAge > TimeSpan.Zero) && (MaxBytes is null || MaxBytes > 0);
-}
 
 /// <summary>
 /// Log append-only en disco. Reemplaza a <c>InMemoryLog</c>.
@@ -39,11 +15,18 @@ public sealed class RetentionOptions
 /// </summary>
 /// <remarks>
 /// Estado: escribe con <c>fsync</c> agrupado, rota segmentos, los indexa en disco de forma
-/// dispersa, recuerda el high watermark entre reinicios y elimina segmentos viejos según retención.
+/// dispersa, recuerda el high watermark entre reinicios y borra los segmentos viejos cuando
+/// <see cref="RetentionService"/> se lo pide.
+/// <para>
+/// La clase está partida en varios archivos, uno por camino: este tiene el contrato
+/// <see cref="ILog"/>, la escritura y el high watermark; <c>SegmentedLog.Read.cs</c> la lectura,
+/// <c>SegmentedLog.Recovery.cs</c> la recuperación al arrancar, <c>SegmentedLog.Retention.cs</c> el
+/// borrado de segmentos viejos y <c>SegmentedLog.TopicLog.cs</c> el estado en memoria de un tópico.
+/// </para>
 /// </remarks>
-public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
+public sealed partial class SegmentedLog : ILog
 {
-    /// <summary>Tamaño al que se cierra un segmento y se abre otro, si no se indica otro.</    /// </summary>
+    /// <summary>Tamaño al que se cierra un segmento y se abre otro, si no se indica otro.</summary>
     public const long DefaultSegmentBytes = 64L * 1024 * 1024;
 
     /// <summary>
@@ -61,17 +44,21 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
     /// <summary>Archivo con el high watermark del tópico, al lado de los segmentos.</summary>
     private const string CheckpointFileName = "checkpoint";
 
+    /// <summary>Archivo con el offset donde empieza el log, si la retención borró los primeros segmentos.</summary>
+    private const string LogStartFileName = "log-start";
+
+    /// <summary>Donde se arma el archivo de arriba antes de renombrarlo sobre el definitivo.</summary>
+    private const string LogStartTempFileName = "log-start.tmp";
+
     private readonly ConcurrentDictionary<string, TopicLog> _topics = new(StringComparer.Ordinal);
     private readonly long _segmentBytes;
     private readonly RetentionOptions _retention;
     private readonly ILogger<SegmentedLog> _logger;
-    private readonly CancellationTokenSource _retentionCts = new();
-    private readonly Task _retentionTask;
 
     /// <param name="dataDir">Carpeta raíz de los datos. En Docker es <c>/data</c> (configuración <c>Broker:DataDir</c>).</param>
     /// <param name="segmentBytes">Tamaño máximo de un segmento. Los tests lo bajan para generar varios.</param>
-    /// <param name="retention">Configuración de retención (TTL y tamaño máximo).</param>
-    /// <param name="logger">Por dónde avisa qué encontró al recuperar. Sin él no loguea nada.</    /// </summary>
+    /// <param name="retention">Hasta cuándo se guardan los segmentos. Lo aplica <see cref="RetentionService"/>.</param>
+    /// <param name="logger">Por dónde avisa qué encontró al recuperar. Sin él no loguea nada.</param>
     public SegmentedLog(
         string dataDir,
         long segmentBytes = DefaultSegmentBytes,
@@ -89,11 +76,9 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
 
         if (!_retention.IsValid())
         {
-            throw new ArgumentException("RetentionOptions inválida: MaxAge y MaxBytes deben ser positivos si se establecen.");
+            throw new ArgumentException(
+                "RetentionOptions inválida: MaxAge y MaxBytes tienen que ser positivos si se definen.", nameof(retention));
         }
-
-        // Iniciar tarea de retención en background
-        _retentionTask = RunRetentionAsync(_retentionCts.Token);
     }
 
     /// <summary>Carpeta raíz donde se guardan los segmentos.</summary>
@@ -104,22 +89,6 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
     /// medida de si el group commit agrupa o si cada mensaje paga el suyo.
     /// </summary>
     internal int FsyncCount => _topics.Values.Sum(log => log.Writer.FsyncCount);
-
-    /// <inheritdoc />
-    public void Dispose()
-    {
-        _retentionCts.Cancel();
-        try { _retentionTask.Wait(TimeSpan.FromSeconds(5)); } catch { }
-        _retentionCts.Dispose();
-    }
-
-    /// <inheritdoc />
-    public async ValueTask DisposeAsync()
-    {
-        _retentionCts.Cancel();
-        try { await _retentionTask.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
-        _retentionCts.Dispose();
-    }
 
     /// <inheritdoc />
     public async ValueTask<long> AppendAsync(
@@ -172,7 +141,7 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
             }
 
             // Recién ahora se actualiza el índice: si la escritura falla, el estado en memoria no miente.
-            segment.Append(segment.Length, bytes.Length);
+            segment.Append(segment.Length, bytes.Length, record.Timestamp);
 
             // Con el stream cerrado, los bytes ya están en el sistema operativo. Desde este punto,
             // un fsync del archivo los baja al disco aunque lo pida otra escritura.
@@ -181,56 +150,22 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
         }
     }
 
-    /// <inheritdoc />
-    public async IAsyncEnumerable<Record> ReadAsync(
-        string topic, int partition, long fromOffset, int max, [EnumeratorCancellation] CancellationToken ct = default)
+    /// <summary>
+    /// Dónde entra el próximo registro. Rota si el segmento activo se pasaría del límite, salvo que
+    /// esté vacío: un registro más grande que el límite tiene que poder guardarse igual, o no habría
+    /// segmento que lo aceptara nunca.
+    /// </summary>
+    private Segment SegmentFor(TopicLog log, int recordSize)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(fromOffset);
-        ArgumentOutOfRangeException.ThrowIfNegative(max);
-
-        var log = Get(topic, partition);
-
-        // Se arma el recorrido una sola vez bajo candado y después se suelta: leer de disco puede
-        // tardar y no hay razón para bloquear a quien quiera escribir mientras tanto.
-        var tramos = PlanRead(log, fromOffset, max);
-
-        foreach (var tramo in tramos)
+        if (log.Segments.Count == 0)
         {
-            using var stream = new FileStream(
-                tramo.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 8192, useAsync: true);
-            stream.Seek(tramo.Start, SeekOrigin.Begin);
-
-            // Dentro de un segmento los registros están pegados uno al otro, así que desde la posición
-            // del primero alcanza con leerlos en orden. Cada uno arranca con su propio largo.
-            var header = new byte[sizeof(int)];
-
-            // El índice es disperso: deja parado en un registro anterior al pedido. Los que sobran
-            // se saltean leyendo solo su largo, sin decodificarlos, porque no se van a devolver.
-            for (long salteados = 0; salteados < tramo.Skip; salteados++)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                int saltar = await ReadSizeAsync(stream, header, tramo.FilePath, ct).ConfigureAwait(false);
-                stream.Seek(saltar - header.Length, SeekOrigin.Current);
-            }
-
-            for (int i = 0; i < tramo.Count; i++)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                int size = await ReadSizeAsync(stream, header, tramo.FilePath, ct).ConfigureAwait(false);
-                var buffer = new byte[size];
-                header.CopyTo(buffer.AsSpan());
-                await stream.ReadExactlyAsync(buffer.AsMemory(header.Length), ct).ConfigureAwait(false);
-
-                if (RecordCodec.TryDecode(buffer, out var decoded, out _) != DecodeStatus.Ok || decoded is null)
-                {
-                    throw Damaged(tramo.FilePath, stream.Position - buffer.Length, "el CRC no cierra");
-                }
-
-                yield return decoded;
-            }
+            return log.Add(log.NextOffset);
         }
+
+        var active = log.Segments[^1];
+        return active.IsEmpty || active.Length + recordSize <= _segmentBytes
+            ? active
+            : log.Add(active.NextOffset);
     }
 
     /// <inheritdoc />
@@ -324,246 +259,6 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
         }
     }
 
-    /// <summary>
-    /// Tarea de retención en background: elimina segmentos viejos según TTL y tamaño máximo.
-    /// </summary>
-    private async Task RunRetentionAsync(CancellationToken ct)
-    {
-        if (_retention.MaxAge is null && _retention.MaxBytes is null)
-        {
-            return; // Sin retención configurada
-        }
-
-        var interval = _retention.CheckInterval;
-        using var timer = new PeriodicTimer(interval);
-
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await timer.WaitForNextTickAsync(ct).ConfigureAwait(false);
-                await ApplyRetentionAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                LogRetentionError(_logger, ex, "unknown", -1);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Aplica políticas de retención a todas las particiones de todos los tópicos.
-    /// </summary>
-    private async Task ApplyRetentionAsync(CancellationToken ct)
-    {
-        var now = DateTimeOffset.UtcNow;
-
-        foreach (var (key, log) in _topics)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            // 1. Retención por tiempo (TTL): eliminar segmentos cuyo último registro es más viejo que MaxAge
-            if (_retention.MaxAge is TimeSpan maxAge)
-            {
-                await DeleteOldSegmentsByTimeAsync(log, now - maxAge, ct).ConfigureAwait(false);
-            }
-
-            // 2. Retención por tamaño: eliminar segmentos más antiguos hasta quedar bajo MaxBytes
-            if (_retention.MaxBytes is long maxBytes)
-            {
-                await DeleteOldSegmentsBySizeAsync(log, maxBytes, ct).ConfigureAwait(false);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Elimina segmentos cuyo último registro (por timestamp) es anterior al cutoff.
-    /// No elimina segmentos que contengan offsets <= high watermark (datos confirmados).
-    /// </summary>
-    private async Task DeleteOldSegmentsByTimeAsync(TopicLog log, DateTimeOffset cutoff, CancellationToken ct)
-    {
-        await log.Writer.CommitPendingAsync().ConfigureAwait(false);
-
-        lock (log.Gate)
-        {
-            // No borrar nada que esté en o antes del high watermark
-            if (log.HighWatermark < 0)
-            {
-                return;
-            }
-
-            // Encontrar el primer segmento que podría contener datos después del cutoff
-            // Los segmentos están ordenados por base offset
-            int firstToKeep = -1;
-            for (int i = 0; i < log.Segments.Count; i++)
-            {
-                var segment = log.Segments[i];
-                // Si el segmento contiene el high watermark o está después, no se toca
-                if (segment.Contains(log.HighWatermark))
-                {
-                    firstToKeep = i;
-                    break;
-                }
-
-                // Verificar si el último registro del segmento tiene timestamp > cutoff
-                // Para simplificar, usamos una heurística: si el segmento no contiene HW y es viejo, se borra
-                // Una implementación más precisa leería el último registro del segmento
-            }
-
-            if (firstToKeep <= 0)
-            {
-                return; // Nada que borrar o todo está protegido por HW
-            }
-
-            // Borrar segmentos antes de firstToKeep
-            for (int i = 0; i < firstToKeep; i++)
-            {
-                File.Delete(log.Segments[i].FilePath);
-                log.Segments[i].Index.Discard();
-            }
-            log.Segments.RemoveRange(0, firstToKeep);
-
-            LogRetentionDeleted(_logger, log.Topic, log.Partition, firstToKeep, "TTL");
-        }
-    }
-
-    /// <summary>
-    /// Elimina los segmentos más antiguos hasta que el tamaño total esté por debajo de maxBytes.
-    /// No elimina segmentos que contengan el high watermark.
-    /// </summary>
-    private async Task DeleteOldSegmentsBySizeAsync(TopicLog log, long maxBytes, CancellationToken ct)
-    {
-        await log.Writer.CommitPendingAsync().ConfigureAwait(false);
-
-        lock (log.Gate)
-        {
-            long totalSize = log.Segments.Sum(s => new FileInfo(s.FilePath).Length);
-            if (totalSize <= maxBytes)
-            {
-                return;
-            }
-
-            int firstToKeep = -1;
-            long accumulated = 0;
-
-            // Empezar desde el segmento más nuevo e ir hacia atrás
-            for (int i = log.Segments.Count - 1; i >= 0; i--)
-            {
-                var segment = log.Segments[i];
-                long segSize = new FileInfo(segment.FilePath).Length;
-
-                if (segment.Contains(log.HighWatermark))
-                {
-                    // Este segmento contiene el HW: no se puede borrar ni nada anterior
-                    firstToKeep = i;
-                    break;
-                }
-
-                accumulated += segSize;
-                if (totalSize - accumulated <= maxBytes)
-                {
-                    firstToKeep = i;
-                    break;
-                }
-            }
-
-            if (firstToKeep <= 0)
-            {
-                return;
-            }
-
-            // Borrar segmentos antes de firstToKeep
-            for (int i = 0; i < firstToKeep; i++)
-            {
-                File.Delete(log.Segments[i].FilePath);
-                log.Segments[i].Index.Discard();
-            }
-            log.Segments.RemoveRange(0, firstToKeep);
-
-            LogRetentionDeleted(_logger, log.Topic, log.Partition, firstToKeep, "size");
-        }
-    }
-
-    /// <summary>
-    /// Dónde entra el próximo registro. Rota si el segmento activo se pasaría del límite, salvo que
-    /// esté vacío: un registro más grande que el límite tiene que poder guardarse igual, o no habría
-    /// segmento que lo aceptara nunca.
-    /// </summary>
-    private Segment SegmentFor(TopicLog log, int recordSize)
-    {
-        if (log.Segments.Count == 0)
-        {
-            return log.Add(0);
-        }
-
-        var active = log.Segments[^1];
-        return active.IsEmpty || active.Length + recordSize <= _segmentBytes
-            ? active
-            : log.Add(active.NextOffset);
-    }
-
-    /// <summary>
-    /// Qué archivo abrir, desde qué byte, cuántos registros saltear desde ahí y cuántos leer. Se
-    /// arma solo con el índice en memoria, sin tocar disco, para poder soltar el candado antes.
-    /// </summary>
-    private static List<(string FilePath, long Start, long Skip, int Count)> PlanRead(
-        TopicLog log, long fromOffset, int max)
-    {
-        var tramos = new List<(string FilePath, long Start, long Skip, int Count)>();
-        lock (log.Gate)
-        {
-            // Hasta lo durable, no hasta lo escrito: no se sirve un registro que el disco todavía
-            // no respalda.
-            long end = log.Writer.DurableOffset + 1;
-            long from = Math.Min(fromOffset, end);
-            long remaining = Math.Min(max, end - from);
-
-            for (int i = log.IndexOf(from); remaining > 0 && i >= 0 && i < log.Segments.Count; i++)
-            {
-                var segment = log.Segments[i];
-                int take = (int)Math.Min(remaining, segment.NextOffset - from);
-                if (take <= 0)
-                {
-                    continue;
-                }
-
-                var anchor = segment.Anchor(from);
-                tramos.Add((segment.FilePath, anchor.Position, from - anchor.Offset, take));
-                from += take;
-                remaining -= take;
-            }
-        }
-
-        return tramos;
-    }
-
-    /// <summary>
-    /// Byte exacto donde empieza ese offset. El índice es disperso, así que deja parado en un
-    /// registro anterior y de ahí se avanza leyendo largos. Toca disco, pero solo al truncar, que
-    /// ya borra archivos y hace <c>fsync</c>.
-    /// </summary>
-    private static long ResolvePosition(Segment segment, long offset)
-    {
-        var anchor = segment.Anchor(offset);
-        using var stream = new FileStream(segment.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        stream.Position = anchor.Position;
-
-        var header = new byte[sizeof(int)];
-        for (long current = anchor.Offset; current < offset; current++)
-        {
-            // En dos pasos a propósito: ReadSize ya dejó la posición después del largo, y meterlo
-            // dentro del += la leería de antes y se saltearía esos cuatro bytes.
-            int size = ReadSize(stream, header, segment.FilePath);
-            stream.Position += size - header.Length;
-        }
-
-        return stream.Position;
-    }
-
     /// <summary>Lee el largo con el que arranca un registro y devuelve cuánto ocupa en total.</summary>
     private static int ReadSize(FileStream stream, byte[] header, string file)
     {
@@ -616,9 +311,11 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
             return Record.Unassigned;
         }
 
-        // Acotado por los dos lados. Por arriba, para no dar por confirmado algo que no está escrito;
-        // por abajo, porque el contrato de ILog dice que el high watermark más chico posible es -1.
-        long usable = Math.Clamp(saved, Record.Unassigned, endOffset);
+        // Acotado por los dos lados. Por arriba, para no dar por confirmado algo que no está escrito.
+        // Por abajo, por el inicio del log: la retención solo borra lo que ya estaba confirmado, así
+        // que un checkpoint anterior al inicio es uno que quedó viejo (no lleva fsync). En un log sin
+        // retención el piso sigue siendo -1, que es el high watermark más chico que admite ILog.
+        long usable = Math.Clamp(saved, log.LogStart - 1, endOffset);
         if (usable != saved)
         {
             LogClampedCheckpoint(_logger, log.Topic, saved, usable);
@@ -639,240 +336,6 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
     private static InvalidDataException Damaged(string file, long position, string detalle) =>
         new($"Registro dañado en '{file}', byte {position}: {detalle}.");
 
-    private TopicLog Get(string topic, int partition)
-    {
-        // El nombre del tópico se usa como nombre de carpeta: validarlo evita rutas tipo "../".
-        if (!TopicConfig.IsValidName(topic))
-        {
-            throw new ArgumentException($"Nombre de tópico inválido: '{topic}'.", nameof(topic));
-        }
-
-        // no hay particiones. Se rechaza cualquier otra en lugar de ignorarla en silencio.
-        ArgumentOutOfRangeException.ThrowIfNotEqual(partition, SingleLogPartition);
-
-        var log = _topics.GetOrAdd(topic, name => new TopicLog(DataDir, name));
-        lock (log.Gate)
-        {
-            if (!log.Recovered)
-            {
-                try
-                {
-                    RebuildIndex(log);
-                }
-                catch (InvalidDataException ex)
-                {
-                    // Un solo lugar para todas las formas de daño: el mensaje de la excepción ya trae
-                    // el archivo, el byte y el motivo. Se loguea y se relanza, no se esconde.
-                    LogUnrecoverable(_logger, ex, topic);
-                    throw;
-                }
-
-                log.Recovered = true;
-            }
-        }
-
-        return log;
-    }
-
-    /// <summary>
-    /// Reconstruye el índice en memoria leyendo todos los segmentos en orden. Corre una sola vez por
-    /// tópico, la primera vez que alguien lo usa; hacerlo al arrancar el proceso lo demoraría y las
-    /// sondas de Kubernetes matan un pod que tarda.
-    /// </summary>
-    private void RebuildIndex(TopicLog log)
-    {
-        if (Directory.Exists(log.DirectoryPath))
-        {
-            var baseOffsets = SegmentBaseOffsets(log);
-            for (int i = 0; i < baseOffsets.Count; i++)
-            {
-                var segment = new Segment(log.DirectoryPath, baseOffsets[i]);
-
-                // Los offsets son contiguos: cada segmento tiene que empezar donde terminó el anterior.
-                if (segment.BaseOffset != log.NextOffset)
-                {
-                    throw Damaged(segment.FilePath, 0, $"debería empezar en el offset {log.NextOffset}");
-                }
-
-                log.Segments.Add(segment);
-                ScanSegment(log, segment, isLast: i == baseOffsets.Count - 1);
-            }
-        }
-
-        // Lo que se acaba de leer del disco es durable por definición.
-        log.Writer.Reset(log.NextOffset - 1);
-        log.HighWatermark = ReadCheckpoint(log, log.NextOffset - 1);
-
-        if (log.Segments.Count > 0)
-        {
-            LogRecovered(_logger, log.Topic, log.NextOffset, log.Segments.Count, log.NextOffset - 1, log.HighWatermark);
-        }
-    }
-
-    /// <summary>Offsets base de los segmentos que hay en la carpeta, de menor a mayor.</summary>
-    private List<long> SegmentBaseOffsets(TopicLog log)
-    {
-        var baseOffsets = new List<long>();
-        foreach (string path in Directory.EnumerateFiles(log.DirectoryPath, "*" + Segment.Extension))
-        {
-            if (Segment.BaseOffsetFromName(path) is long baseOffset)
-            {
-                baseOffsets.Add(baseOffset);
-            }
-            else
-            {
-                // Se ignora, pero avisando: un archivo así en la carpeta de datos es algo que nadie
-                // puso a propósito, y descubrirlo en silencio es peor que descubrirlo tarde.
-                LogIgnoredFile(_logger, Path.GetFileName(path), log.Topic);
-            }
-        }
-
-        baseOffsets.Sort();
-        return baseOffsets;
-    }
-
-    private void ScanSegment(TopicLog log, Segment segment, bool isLast)
-    {
-        long total;
-        long valid;
-        using (var stream = new FileStream(segment.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
-        {
-            total = stream.Length;
-            valid = Scan(log, segment, stream);
-        }
-
-        segment.Length = valid;
-        if (valid == total)
-        {
-            return;
-        }
-
-        // Una escritura solo puede quedar cortada en el segmento activo: la rotación ocurre entre
-        // registros, así que un segmento cerrado siempre termina justo donde termina uno.
-        if (!isLast)
-        {
-            throw Damaged(segment.FilePath, valid, "un segmento cerrado no puede terminar a mitad de un registro");
-        }
-
-        // El proceso murió escribiendo. Se descarta sin culpa: ese AppendAsync nunca devolvió un offset.
-        LogIncompleteWrite(_logger, Path.GetFileName(segment.FilePath), log.Topic, total, valid);
-        Cut(segment.FilePath, valid);
-
-        // Y el recorte puede haber dejado un ancla apuntando a un registro que ya no está.
-        segment.Index.DropFrom(segment.RecordCount);
-    }
-
-    /// <summary>
-    /// Recorre el segmento desde donde haga falta y devuelve hasta dónde llega lo válido. Con un
-    /// índice que valida alcanza leer desde su última entrada: todo lo anterior ya está descrito
-    /// ahí, y es lo que hace que arrancar no cueste releer el log completo.
-    /// </summary>
-    private long Scan(TopicLog log, Segment segment, FileStream stream)
-    {
-        bool hadIndex = File.Exists(segment.Index.FilePath);
-        if (segment.Index.TryLoad(stream.Length))
-        {
-            var from = segment.Index.Last;
-            try
-            {
-                long valid = ScanRecords(log, segment, stream, from);
-
-                // No haber podido leer ni un registro significa que la última entrada del índice no
-                // cae donde empieza uno. El que está mal es el índice, no el log: aceptar ese
-                // resultado haría recortar el log ahí, y eso sí perdería datos buenos.
-                if (valid > from.Position)
-                {
-                    return valid;
-                }
-            }
-            catch (InvalidDataException)
-            {
-                // Lo mismo, detectado un paso antes: donde apunta el índice no hay un registro.
-            }
-        }
-
-        // El índice no sirve o no está: se rehace recorriendo el log, la única fuente de verdad.
-        // Solo se avisa si el archivo existía y no sirvió: que falte es lo normal en un segmento que
-        // nunca llegó a los 4 KB, y avisar de eso en cada arranque sería ruido.
-        if (hadIndex)
-        {
-            LogRebuildingIndex(_logger, Path.GetFileName(segment.FilePath), log.Topic);
-        }
-
-        segment.Index.Discard();
-        return ScanRecords(log, segment, stream, from: (0, 0));
-    }
-
-    /// <summary>
-    /// Recorre un segmento desde un punto conocido anotando cada registro, y devuelve hasta dónde
-    /// llegó lo válido.
-    /// </summary>
-    private static long ScanRecords(
-        TopicLog log, Segment segment, FileStream stream, (long RelativeOffset, long Position) from)
-    {
-        // El punto de partida ya tiene registros detrás y el índice sabe cuántos. Sin esto, los
-        // offsets que vienen no coincidirían con los que el recorrido espera.
-        segment.RecordCount = from.RelativeOffset;
-
-        var header = new byte[sizeof(int)];
-        long position = from.Position;
-
-        while (stream.Length - position >= header.Length)
-        {
-            stream.Position = position;
-            int size = ReadSize(stream, header, segment.FilePath);
-            if (stream.Length - position < size)
-            {
-                break; // Falta la cola del registro: escritura cortada.
-            }
-
-            var buffer = new byte[size];
-            stream.Position = position;
-            stream.ReadExactly(buffer);
-
-            var status = RecordCodec.TryDecode(buffer, out var decoded, out int consumed);
-            if (status == DecodeStatus.Incomplete)
-            {
-                break;
-            }
-
-            if (status != DecodeStatus.Ok || decoded is null)
-            {
-                // CRC que no cierra: no es una escritura cortada, es daño sobre bytes ya guardados.
-                // Se falla fuerte en vez de descartar: perder datos en silencio es peor que no arrancar.
-                throw Damaged(segment.FilePath, position, "el CRC no cierra");
-            }
-
-            if (decoded.Offset != log.NextOffset)
-            {
-                throw Damaged(
-                    segment.FilePath, position, $"dice offset {decoded.Offset} y le corresponde {log.NextOffset}");
-            }
-
-            segment.Append(position, consumed);
-            position += consumed;
-        }
-
-        return position;
-    }
-
-    [LoggerMessage(
-        Level = LogLevel.Information,
-        Message = "Recovered {Topic} from disk: {Records} records in {Segments} segments, end offset {EndOffset}, high watermark {HighWatermark}.")]
-    private static partial void LogRecovered(
-        ILogger logger, string topic, long records, int segments, long endOffset, long highWatermark);
-
-    [LoggerMessage(
-        Level = LogLevel.Warning,
-        Message = "Discarded an incomplete write at the end of {File} in {Topic}: truncated from {Length} to {ValidLength} bytes. The append that wrote it never returned an offset.")]
-    private static partial void LogIncompleteWrite(
-        ILogger logger, string file, string topic, long length, long validLength);
-
-    [LoggerMessage(
-        Level = LogLevel.Warning,
-        Message = "Rebuilding the index of {File} in {Topic}: the .index file does not describe the segment. Nothing is lost, but recovery had to read the whole segment.")]
-    private static partial void LogRebuildingIndex(ILogger logger, string file, string topic);
-
     [LoggerMessage(
         Level = LogLevel.Warning,
         Message = "Ignored the checkpoint of {Topic}: '{Contents}' is not a number. Starting with no confirmed records until replication raises the high watermark again.")]
@@ -882,85 +345,4 @@ public sealed partial class SegmentedLog : ILog, IDisposable, IAsyncDisposable
         Level = LogLevel.Warning,
         Message = "Clamped the checkpoint of {Topic} from {Saved} to {Usable}: the log cannot back that high watermark.")]
     private static partial void LogClampedCheckpoint(ILogger logger, string topic, long saved, long usable);
-
-    [LoggerMessage(
-        Level = LogLevel.Warning,
-        Message = "Ignored {File} in the data directory of {Topic}: its name is not a segment base offset.")]
-    private static partial void LogIgnoredFile(ILogger logger, string file, string topic);
-
-    [LoggerMessage(
-        Level = LogLevel.Critical,
-        Message = "Cannot recover {Topic} from disk. Refusing to serve the topic instead of dropping records: a gap in the middle of a log is not something another broker can restore.")]
-    private static partial void LogUnrecoverable(ILogger logger, Exception exception, string topic);
-
-    [LoggerMessage(
-        Level = LogLevel.Information,
-        Message = "Retention deleted {Count} segments from {Topic} partition {Partition} ({Reason}).")]
-    private static partial void LogRetentionDeleted(ILogger logger, string topic, int partition, int count, string reason);
-
-    [LoggerMessage(
-        Level = LogLevel.Error,
-        Message = "Retention task failed for {Topic} partition {Partition}.")]
-    private static partial void LogRetentionError(ILogger logger, Exception exception, string topic, int partition);
-
-    /// <summary>Estado de una partición de un tópico: sus segmentos en orden y hasta dónde está confirmado.</summary>
-    private sealed class TopicLog
-    {
-        public TopicLog(string dataDir, string topic, int partition = 0)
-        {
-            Topic = topic;
-            Partition = partition;
-            DirectoryPath = Path.Combine(dataDir, topic);
-            CheckpointFile = Path.Combine(DirectoryPath, CheckpointFileName);
-        }
-
-        /// <summary>Nombre del tópico. Se usa para que los mensajes de log digan de cuál hablan.</summary>
-        public string Topic { get; }
-
-        /// <summary>En este alcance hay un solo log por tópico; la partición es siempre 0.</summary>
-        public int Partition { get; }
-
-        public Lock Gate { get; } = new();
-
-        /// <summary>Quien agrupa los <c>fsync</c> de este tópico y sabe hasta dónde llega el disco.</summary>
-        public GroupCommitWriter Writer { get; } = new();
-
-        public string DirectoryPath { get; }
-
-        /// <summary>Archivo donde sobrevive el high watermark entre reinicios.</summary>
-        public string CheckpointFile { get; }
-
-        /// <summary>Segmentos ordenados por offset base. El último es donde se escribe.</summary>
-        public List<Segment> Segments { get; } = [];
-
-        /// <summary>Último offset confirmado por quórum. Se refleja en <see cref="CheckpointFile"/>.</summary>
-        public long HighWatermark { get; set; } = -1;
-
-        /// <summary>Si ya se leyeron los segmentos para reconstruir el índice.</summary>
-        public bool Recovered { get; set; }
-
-        /// <summary>Offset que le toca al próximo registro. En un log vacío es 0.</summary>
-        public long NextOffset => Segments.Count == 0 ? 0 : Segments[^1].NextOffset;
-
-        public Segment Add(long baseOffset)
-        {
-            var segment = new Segment(DirectoryPath, baseOffset);
-            Segments.Add(segment);
-            return segment;
-        }
-
-        /// <summary>Índice del segmento que contiene ese offset, o -1 si no está en ninguno.</summary>
-        public int IndexOf(long offset)
-        {
-            for (int i = Segments.Count - 1; i >= 0; i--)
-            {
-                if (Segments[i].Contains(offset))
-                {
-                    return i;
-                }
-            }
-
-            return -1;
-        }
-    }
 }

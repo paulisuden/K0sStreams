@@ -2,8 +2,11 @@
 
   <ItemGroup>
     <!-- Trae las implementaciones de Microsoft.Extensions.* (ServiceCollection, ConfigurationBuilder)
-         para poder testear AddK0sStorage. No agrega ningún paquete NuGet. -->
+         para poder testear AddK0sStorage. -->
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <!-- FakeTimeProvider, el reloj de los tests de retención. La versión ya está en
+         Directory.Packages.props, igual que para Replication y Coordination. -->
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
     <ProjectReference Include="../../src/K0sStreams.Storage/K0sStreams.Storage.csproj" />
   </ItemGroup>
 

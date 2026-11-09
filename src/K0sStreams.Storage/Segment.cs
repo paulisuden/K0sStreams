@@ -36,6 +36,14 @@ internal sealed class Segment
     /// <summary>Bytes válidos del archivo, o sea dónde va a caer el próximo registro.</summary>
     public long Length { get; set; }
 
+    /// <summary>
+    /// El timestamp más nuevo que vio, en ms Unix, o 0 si todavía está vacío. Lo usa la retención
+    /// para decidir por antigüedad sin releer el segmento en cada pasada. Es el más nuevo y no el
+    /// último porque los relojes de los brokers no están sincronizados: un registro con fecha
+    /// anterior al que tiene al lado no puede hacer que el segmento parezca más viejo de lo que es.
+    /// </summary>
+    public long NewestTimestamp { get; private set; }
+
     /// <summary>Offset que sigue al último que contiene. En un segmento vacío es <see cref="BaseOffset"/>.</summary>
     public long NextOffset => BaseOffset + RecordCount;
 
@@ -54,15 +62,16 @@ internal sealed class Segment
     }
 
     /// <summary>
-    /// Suma un registro al final: lo cuenta, corre el largo y se lo ofrece al índice, que decide si
-    /// le toca anotarlo. Lo usan tanto una escritura nueva como la recuperación al arrancar, así que
-    /// el índice queda igual por los dos caminos.
+    /// Suma un registro al final: lo cuenta, corre el largo, anota su fecha si es la más nueva y se
+    /// lo ofrece al índice, que decide si le toca anotarlo. Lo usan tanto una escritura nueva como
+    /// la recuperación al arrancar, así que el segmento queda igual por los dos caminos.
     /// </summary>
-    public void Append(long position, int size)
+    public void Append(long position, int size, long timestamp)
     {
         Index.Note(RecordCount, position);
         RecordCount++;
         Length = position + size;
+        NewestTimestamp = Math.Max(NewestTimestamp, timestamp);
     }
 
     /// <summary>Borra del índice los offsets desde <paramref name="fromOffset"/> en adelante.</summary>
@@ -70,6 +79,9 @@ internal sealed class Segment
     {
         RecordCount = fromOffset - BaseOffset;
         Index.DropFrom(RecordCount);
+
+        // NewestTimestamp queda como estaba: recalcularlo costaría releer el segmento, y de más
+        // queda del lado seguro, porque hace que la retención lo conserve más tiempo, no menos.
     }
 
     public static string NameFor(long baseOffset) =>
