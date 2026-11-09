@@ -28,7 +28,11 @@
   "templating": {
     "list": [
       {
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "prometheus"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Prometheus",
@@ -42,7 +46,15 @@
         "type": "datasource"
       },
       {
-        "current": {},
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
