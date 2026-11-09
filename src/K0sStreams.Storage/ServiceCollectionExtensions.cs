@@ -1,6 +1,7 @@
 using K0sStreams.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -11,7 +12,7 @@ public static class ServiceCollectionExtensions
     /// <summary>Carpeta de datos cuando no hay configuración: al lado del ejecutable.</summary>
     private const string DefaultDataDirName = "data";
 
-    /// <summary>Registra el log y el catálogo de tópicos. Dueño: A — Almacenamiento.</summary>
+    /// <summary>Registra el log, su retención y el catálogo de tópicos. Dueño: A — Almacenamiento.</summary>
     public static IServiceCollection AddK0sStorage(this IServiceCollection services, IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
@@ -23,11 +24,19 @@ public static class ServiceCollectionExtensions
 
         // GetService y no GetRequiredService: si el host no configuró logging, el log arranca sin
         // loguear en lugar de no arrancar. El arranque rápido manda (CLAUDE.md, sondas de Kubernetes).
-        services.AddSingleton<ILog>(provider => new SegmentedLog(
+        services.AddSingleton(provider => new SegmentedLog(
             ResolveDataDir(configuration),
             SegmentedLog.DefaultSegmentBytes,
             provider.GetRequiredService<IOptions<RetentionOptions>>().Value,
             provider.GetService<ILogger<SegmentedLog>>()));
+
+        // El tipo concreto además del contrato: la retención es de este log en particular, no de
+        // cualquier ILog. Los otros bloques siguen recibiendo ILog y no se enteran.
+        services.AddSingleton<ILog>(provider => provider.GetRequiredService<SegmentedLog>());
+
+        // La retención corre como tarea del host y no dentro del log: así el apagado del pod la
+        // detiene con su CancellationToken y el log no arranca nada por su cuenta.
+        services.AddHostedService<RetentionService>();
 
         // Los tópicos se guardan en el mismo log, replicados por quórum (DEC-003). Necesita IReplicator e IClusterState,
         // que registran Replication y Coordination.

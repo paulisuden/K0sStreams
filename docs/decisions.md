@@ -264,3 +264,85 @@ Delivery state (leases, visibility, attempt counts, scheduled retries) lives in 
 
 - **Commit the cursor on every ack.** Stronger durability window, but returns to a per-message quorum write and loses the throughput gain.
 - **Keep event sourcing for delivery state.** The previous design: exact reconstruction, at three writes per message and unbounded history.
+
+---
+
+## DEC-005 · Segment retention: delete by age or size, and remember where the log starts
+
+| | |
+| --- | --- |
+| Date | 7 Nov 2026 |
+| Proposed by | A, Storage |
+| Status | Implemented on `fix/storage-retention`. Nothing outside `K0sStreams.Storage` changes; the `Retention` section and its three keys stay exactly as the chart uses them. |
+
+### Context
+
+Retention arrived with commit `9d7a73b` (3 Nov 2026) so the demo would not fill its disk. A task inside `SegmentedLog` woke up every `Retention:CheckInterval` and deleted old segments, and the Helm chart turns it on by default (`MaxAge 24:00:00`, `MaxBytes 1 GiB`, `CheckInterval 00:05:00`).
+
+It deleted the right kind of thing for the wrong reasons, and the log could not come back afterwards:
+
+1. **Age was never measured.** `DeleteOldSegmentsByTimeAsync` took a cutoff and never compared it to anything: it deleted every segment before the one holding the high watermark, whatever its age. With `MaxAge` at a day, segments minutes old were deleted.
+2. **Size was not measured either.** The same shortcut in `DeleteOldSegmentsBySizeAsync` deleted everything below the high watermark regardless of `MaxBytes`.
+3. **A pruned topic did not survive a restart.** `RebuildIndex` required the first segment to start at offset 0, so after deleting it the next start treated the topic as damaged and refused to serve it at all.
+4. **Reading below what was deleted was undefined.** `PlanRead` returned an empty plan, so a consumer asking for a deleted offset got zero records and could not tell that from reaching the end of the log.
+5. **A reader could race a delete.** The plan was built under the topic's lock, but the files were opened after releasing it.
+6. **Time came from `DateTimeOffset.UtcNow` and a `PeriodicTimer` with no `TimeProvider`**, which the repo rules forbid and which made the whole thing untestable.
+7. The task was started from `SegmentedLog`'s constructor, with a blocking `Dispose`, empty `catch` blocks and two broken XML comments.
+8. There was not one test.
+
+### Decision
+
+Keep the idea — delete old segments by age or by size — and make it safe.
+
+| | What |
+| --- | --- |
+| **A** | Never delete the active segment, the one holding the high watermark, or anything after it. Unconfirmed records are never deleted, so with nothing confirmed nothing is deleted. |
+| **B** | By age: delete a segment only when its **newest** record is older than `MaxAge`. Each `Segment` remembers the newest timestamp it has seen, updated both when writing and when scanning on recovery, so a pass costs no disk reads. |
+| **C** | By size: delete the oldest segments until the topic fits in `MaxBytes`, using the length each segment already knows. |
+| **D** | Before deleting anything, write the first offset that will remain to a small `log-start` file in the topic's folder (temp file, `fsync`, atomic rename, `fsync` of the folder), and only then delete the `.log` and `.index` files. On recovery: with `log-start`, the first segment must start there and that is where the log starts; segments left entirely below it (a power cut mid-delete) are deleted now and recovery continues; without `log-start`, the old rule holds and the first segment must start at 0. A real gap between segments is still damage. |
+| **E** | Reading from an offset below the start of the log returns from the start instead of returning nothing. `ILog` does not change: this is internal behaviour. |
+| **F** | If a planned segment is gone by the time it is opened, the read is re-planned from the current start of the log instead of failing. An already-open file keeps working on Linux even if it is deleted. |
+| **G** | Retention no longer runs inside the log. `SegmentedLog` exposes one internal method that applies retention once, for a given instant, and a small `RetentionService` (`BackgroundService`) calls it every `CheckInterval` with a `PeriodicTimer` and the injected `TimeProvider`, honouring the host's `CancellationToken`. Disk errors are logged with `ILogger` and the next round retries. |
+| **H** | The `Retention` section and its keys (`MaxAge`, `MaxBytes`, `CheckInterval`) keep their names, meaning and format. Both limits empty means retention is off, including when they arrive as empty environment variables. |
+| **I** | Deletion always goes oldest first and never leaves a hole. |
+
+### What changes
+
+| Where | Change |
+| --- | --- |
+| **A**, Storage | All of the above, plus 16 tests in `RetentionTests.cs` covering age, size, protection of the high watermark, recovery after deleting, an interrupted delete, a real gap, reading below the start, a read racing a delete, and the configuration. |
+| **B**, Queue and API | Nothing to do. One behaviour to know: asking for an offset retention already deleted now returns records from the start of the log instead of an empty page. A consumer whose cursor fell behind retention skips forward instead of stalling. |
+| **C**, Replication | Nothing to do, but see the known limit below. |
+| **D**, Platform | Nothing to do: no new keys, no new projects, no changes under `deploy/`. One thing worth checking, below. |
+| Contracts | Nothing. |
+
+### Known limit for C, Replication
+
+Each broker applies retention on its own, over the topics it has open. A follower that falls far behind can ask the leader for an offset the leader has already deleted, and replication today has no way to skip forward to the start of the log. With a day or a gibibyte per topic this should not happen during the demo, but it is a real hole in the design, and the fix belongs to replication (answer "that offset is gone, start at N" and let the follower jump).
+
+### Something for D to check
+
+The chart sets `retention.maxAge: "24:00:00"`, and the README reads it as 24 hours. .NET parses that string as `d:hh:mm`, so it binds to **24 days**, not 24 hours: 24 is not a valid hour. In practice only the size limit is doing anything in the deployed chart. Twenty-four hours is written `"1.00:00:00"`. The value lives in `deploy/helm/k0sstreams/values.yaml` and `src/K0sStreams.Broker/appsettings.k8s.json`, which belong to other blocks, so Storage only pinned the current behaviour in a test.
+
+### Consequences
+
+**Gains**
+
+- A segment is deleted only once every record in it is older than `MaxAge`, or only when the topic does not fit in `MaxBytes`.
+- A topic survives retention plus a restart, plus a power cut in the middle of a delete.
+- A consumer or a replica that asks for a deleted offset gets served from the start of the log instead of an error or an empty answer.
+- Retention is testable, and the pod shuts down cleanly because the loop belongs to the host.
+
+**Costs**
+
+- One more small file per topic (`log-start`), and two `fsync` calls each time segments are deleted.
+- Each segment carries one extra `long` in memory.
+- Retention only covers the topics this broker has opened since it started. A topic nobody has touched since the last restart is not cleaned up until someone reads or writes it. For the demo that is enough; scanning the data directory would mean recovering every topic at startup, which the Kubernetes probes do not allow.
+- After a truncation, a segment keeps the newest timestamp it ever saw, which can be newer than what it still holds. That errs towards keeping the segment longer, never towards deleting it too early.
+
+### Alternatives considered
+
+- **Read the last record of each segment on every pass** instead of remembering the newest timestamp. Correct, but it turns a cheap pass into one disk read per segment per topic every five minutes.
+- **Derive the start of the log from the first segment's file name**, with no `log-start` file. Simpler, but then a first segment lost to real damage is indistinguishable from one deleted on purpose, and the recovery check that catches gaps would have to go.
+- **Delete the whole prefix below the high watermark**, which is what the code did. It is not retention: it deletes confirmed data as soon as it is confirmed, whatever the configuration says.
+- **Keep the loop inside `SegmentedLog`.** Rejected: the log would own a task nobody can stop, and the time could not be faked.
